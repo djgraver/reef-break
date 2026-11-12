@@ -1,0 +1,675 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Reef Break</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one CRT-style screen, a control strip under it, data view floating over the screen corner. */
+:root{--bg:#0b0f24;--panel:#141a3a;--line:#2b3570;--fg:#d8e4ff;--dim:#7f8ec4;--hi:#55ffff;--warn:#ffff55;--mag:#ff55ff;
+ --px:'Press Start 2P','Courier New',monospace;--mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;color-scheme:dark}
+html,body{height:auto}
+body{background:var(--bg);color:var(--fg);font:13px/1.5 var(--mono);margin:0;
+ padding-block:20px 32px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1180px;margin:0 auto;display:grid;gap:14px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:6px 18px}
+h1{font:400 18px/1.3 var(--px);margin:0;color:var(--hi);letter-spacing:1px;text-wrap:balance}
+#hud{font:400 10px/1.6 var(--px);color:var(--warn);min-width:0}
+.screen{position:relative;border:3px solid var(--line);background:#000;box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--line)}
+#scr{display:block;width:100%;aspect-ratio:16/9;image-rendering:pixelated;max-width:100%}
+#plan{position:absolute;right:8px;top:8px;width:30%;max-width:240px;image-rendering:pixelated;border:2px solid var(--hi);background:#000}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button{font:400 10px/1 var(--px);color:var(--fg);background:var(--panel);border:2px solid var(--line);padding:10px 12px;cursor:pointer;border-radius:0}
+button:hover{border-color:var(--hi);color:var(--hi)}
+button:focus-visible{outline:2px solid var(--warn);outline-offset:2px}
+button[aria-pressed="true"]{background:var(--hi);color:#001;border-color:var(--hi)}
+.sz{display:flex;align-items:center;gap:6px;font:400 10px var(--px);color:var(--dim)}
+#size{color:var(--fg);min-width:5ch;text-align:center}
+.keys{color:var(--dim);font-size:12px;margin:0;min-width:0;text-wrap:pretty}
+.keys b{color:var(--fg);font-weight:600}
+@media (max-width:520px){h1{font-size:14px}#plan{width:38%}}
+</style>
+<div class="wrap">
+ <header><h1>REEF BREAK</h1><div id="hud" aria-live="off">LOADING</div></header>
+ <div class="screen"><canvas id="scr" width="480" height="270" aria-label="Wave simulation view from the beach"></canvas><canvas id="plan" width="192" height="108" hidden aria-label="Plan view of crest lines and reef depth"></canvas></div>
+ <div class="bar">
+  <button id="bPause">Pause</button><button id="bSet">Send wave</button><button id="bSpeed">Speed 1x</button>
+  <button id="bReef">Peels left to right</button><button id="bPlan" aria-pressed="false">Data view</button>
+  <span class="sz"><button id="bSmall" aria-label="Smaller swell">-</button><span id="size">2.7 m</span><button id="bBig" aria-label="Bigger swell">+</button></span>
+ </div>
+ <p class="keys"><b>Space</b> pause · <b>S</b> send a wave · <b>D</b> data view (crest lines over seabed depth: cyan rolling, yellow curling, white crashed) · the camera follows the barrel on its own. The HUD reads the peel angle off the breaking wave: under 18° it closes out, 18–65° it peels, over 65° it is slow. One wave arrives about every 24 seconds. The Sandbar preset has peeling sections, closeout sections and a rip channel.</p>
+</div>
+<script>
+'use strict';
+// ============================================================
+// SURF SIM — core: noise, reef bathymetry, swell sets, wave physics
+// Every wave is a crest line sampled at NX columns. Each column
+// carries its own state (position, height, curl phase, crash timer),
+// and is advanced by shallow-water physics over a real depth map.
+// ============================================================
+const CFG = {
+  NX: 520, XR: 120, G: 9.81, DSEA: 9, ZSPAWN: 120, ZCAM: 8, GAP: 24,
+  T: 11, SET: 3.3, TIMESCALE: 1, GAMMA: 0.78
+};
+const DX = (2 * CFG.XR) / (CFG.NX - 1);
+const COLX = new Float32Array(CFG.NX);
+for (let i = 0; i < CFG.NX; i++) COLX[i] = -CFG.XR + i * DX;
+const NR = Math.round(3 / DX);   // a broken column helps trigger neighbours within ~3 m (the peel)
+const PR = Math.round(4.6 / DX); // peel angle is measured across +-4.6 m of crest
+
+// ---------- deterministic RNG + 1D value noise ----------
+let _seed = 1337;
+function rnd() { _seed = (_seed * 1664525 + 1013904223) >>> 0; return _seed / 4294967296; }
+const _nt = new Float32Array(256); for (let i = 0; i < 256; i++) _nt[i] = rnd();
+function vnoise(x) {
+  const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f);
+  return _nt[i & 255] * (1 - u) + _nt[(i + 1) & 255] * u;
+}
+function fbm(x) { return (vnoise(x) * 0.6 + vnoise(x * 2.1 + 17) * 0.3 + vnoise(x * 4.3 + 41) * 0.1) * 2 - 1; }
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const smooth = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---------- reef: an A-frame peak with a short steep left, long mellow right ----------
+const REEF = { xp: 12, zp: 57, kL: 0.9, kR: 0.5, top: 1.4, mode: 'A' };
+function setReef(mode) {
+  REEF.mode = mode;
+  if (mode === 'A') { REEF.xp = 0; REEF.kL = 1.5; REEF.kR = 1.5; }
+  if (mode === 'L') { REEF.xp = 30; REEF.kL = 1.4; REEF.kR = 3.5; }
+  if (mode === 'R') { REEF.xp = -30; REEF.kL = 3.5; REEF.kR = 1.4; }
+  buildBathy(mode === 'S' ? depthBar : depthReef);
+}
+function reefZ(x) { return x < REEF.xp ? REEF.zp - REEF.kL * (REEF.xp - x) : REEF.zp - REEF.kR * (x - REEF.xp); }
+function bottomSlope(x) { return clamp(0.095 + 0.04 * Math.sin(x * 0.062 + 1.0) + 0.015 * Math.sin(x * 0.19), 0.05, 0.15); }
+// Seabed generators: depth in metres at (x, z), z = distance offshore from the beach.
+// They only run when a preset is chosen, to fill the depth grid below.
+function depthReef(x, z) {
+  const s = z - reefZ(x);
+  if (s > 0) return Math.min(CFG.DSEA, REEF.top + bottomSlope(x) * Math.min(s, 25) + 0.13 * Math.max(0, s - 25));
+  return Math.max(0.5, REEF.top * (0.45 + 0.55 * clamp(z / Math.max(reefZ(x), 1), 0, 1)));
+}
+// Beach-break sandbar: a wandering bar crest with a rip channel cut through it. Where the bar runs
+// parallel to the swell the wave closes out; where it runs oblique the wave peels.
+function depthBar(x, z) {
+  const zb = 62 - 1.1 * clamp(x + 5, -35, 40) + 8 * Math.sin(x * 0.065) + 3 * Math.sin(x * 0.19 + 1);
+  const s = z - zb, hb = 1.35 + 3.4 * Math.exp(-(((x + 48) / 8) ** 2));
+  if (s > 0) return Math.min(CFG.DSEA, hb + 0.1 * Math.min(s, 25) + 0.13 * Math.max(0, s - 25));
+  return Math.min(hb + (2.4 - hb) * smooth(0, -12, s), 0.5 + 0.09 * z);
+}
+
+// ---------- bathymetry as a real depth grid ----------
+// The seabed is stored as sampled depths (metres) on a regular grid and read back with bilinear
+// interpolation, so the wave model only ever sees data points. The shoreward seabed slope is
+// precomputed beside it, because both the breaker index and the breaker type depend on it.
+const GRID = { x0: -180, z0: 0, step: 1.5, nx: 241, nz: 174 };
+const BATH = new Float32Array(GRID.nx * GRID.nz), SLZ = new Float32Array(GRID.nx * GRID.nz);
+function buildBathy(fn) {
+  const nx = GRID.nx, nz = GRID.nz;
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) BATH[j * nx + i] = fn(GRID.x0 + i * GRID.step, GRID.z0 + j * GRID.step);
+  for (let j = 0; j < nz; j++) {
+    const ja = Math.max(0, j - 1), jb = Math.min(nz - 1, j + 1);
+    for (let i = 0; i < nx; i++) SLZ[j * nx + i] = (BATH[jb * nx + i] - BATH[ja * nx + i]) / ((jb - ja) * GRID.step);
+  }
+}
+function gridAt(F, x, z) {
+  const nx = GRID.nx;
+  let u = (x - GRID.x0) / GRID.step, v = (z - GRID.z0) / GRID.step;
+  u = u < 0 ? 0 : u > nx - 1.001 ? nx - 1.001 : u; v = v < 0 ? 0 : v > GRID.nz - 1.001 ? GRID.nz - 1.001 : v;
+  const i = u | 0, j = v | 0, fu = u - i, fv = v - j, o = j * nx + i;
+  return (F[o] * (1 - fu) + F[o + 1] * fu) * (1 - fv) + (F[o + nx] * (1 - fu) + F[o + nx + 1] * fu) * fv;
+}
+const depth = (x, z) => gridAt(BATH, x, z);
+const slopeAt = (x, z) => Math.max(0.03, gridAt(SLZ, x, z)); // rise of the seabed per metre of travel toward shore
+
+// Breaker index gamma = Hb/hb: a wave breaks once its height passes gamma times the local depth.
+// Miche's limit is ~0.88 on a flat bed, and measured values climb on steeper beds. Tuned to this
+// game's scale: 0.78 at the average reef slope, higher on steep ground, lower on flat ground.
+const breakerIndex = m => clamp(CFG.GAMMA + 2.0 * (m - 0.095), 0.65, 1.0);
+// Breaker type from the Iribarren number (surf similarity) xi = slope / sqrt(deep-water steepness):
+// below ~0.5 spilling, ~0.5-3.3 plunging, above that surging. Our slopes sit in the spilling-to-plunging
+// span, so that span is mapped to 0 (spilling) .. 1 (hard plunging).
+const L0 = CFG.G * CFG.T * CFG.T / (2 * Math.PI);
+const plungeIndex = (m, H0) => smooth(0.45, 1.35, m / Math.sqrt(Math.max(0.2, H0) / L0));
+setReef('R');
+
+// ---------- waves ----------
+class Wave {
+  constructor(H0, seed) {
+    const n = CFG.NX;
+    this.H0 = H0; this.age = 0; this.seed = seed; this.dead = false;
+    this.z = new Float32Array(n); this.H = new Float32Array(n); this.Hdeep = new Float32Array(n);
+    this.p = new Float32Array(n);          // curl phase 0..1 (0 = not breaking)
+    this.tc = new Float32Array(n).fill(-1);// seconds since crash (-1 = unbroken)
+    this.zb = new Float32Array(n);         // where it crashed
+    this.Hc = new Float32Array(n);         // height at crash
+    this.plunge = new Float32Array(n);     // 0 spilling .. 1 hard plunging
+    this.alive = new Uint8Array(n).fill(1);
+    this.tb = new Float32Array(n).fill(-1);// wave age when the break began (-1 = not yet): the peel trail
+    this.db = new Float32Array(n);         // depth where it began breaking
+    this.zx = new Float32Array(n); this.zxx = new Float32Array(n);
+    const tilt = (rnd() - 0.5) * 0.16, sd = seed * 13.7;
+    for (let i = 0; i < n; i++) {
+      const x = COLX[i];
+      this.z[i] = CFG.ZSPAWN + tilt * x + 7 * fbm(x * 0.018 + sd);
+      this.Hdeep[i] = H0 * (1 + 0.10 * fbm(x * 0.03 + sd + 5));
+      this.H[i] = this.Hdeep[i];
+    }
+  }
+  step(dt) {
+    const n = CFG.NX, z = this.z, H = this.H, p = this.p, tc = this.tc, G = CFG.G;
+    this.age += dt;
+    for (let i = 0; i < n; i++) {
+      const a = z[Math.max(0, i - 1)], b = z[Math.min(n - 1, i + 1)];
+      this.zx[i] = clamp((b - a) / (2 * DX), -1.6, 1.6);
+      this.zxx[i] = (a - 2 * z[i] + b) / (DX * DX);
+    }
+    const D = 3.5, zn = new Float32Array(n);
+    let anyAlive = false;
+    for (let i = 0; i < n; i++) {
+      if (!this.alive[i]) { zn[i] = z[i]; continue; }
+      const x = COLX[i], d = Math.max(0.5, depth(x, z[i]));
+      let c = Math.sqrt(G * d); if (tc[i] >= 0) c *= 1.12;
+      zn[i] = z[i] - c * Math.sqrt(1 + this.zx[i] ** 2) * dt + D * this.zxx[i] * dt;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!this.alive[i]) continue;
+      z[i] = zn[i];
+      if (z[i] < CFG.ZCAM + 13) { this.alive[i] = 0; H[i] = 0; continue; }
+      anyAlive = true;
+      const x = COLX[i], d = Math.max(0.5, depth(x, z[i]));
+      const runup = Math.max(0.3, (z[i] - (CFG.ZCAM + 13)) * 0.3);  // the wave runs out onto the shore instead of being cut off
+      if (H[i] > runup) H[i] = runup;
+      if (tc[i] < 0) {
+        // shoaling (Green's law) plus focusing where the crest bends concave toward shore
+        const focus = 1 + clamp(-this.zxx[i] * 6, -0.12, 0.2);
+        const goal = this.Hdeep[i] * Math.pow(CFG.DSEA / d, 0.25) * focus;
+        H[i] += (goal - H[i]) * Math.min(1, dt * 2.5);
+        const gam = H[i] / d, m = slopeAt(x, z[i]);
+        if (p[i] === 0) {
+          // a broken neighbour makes the break run along the crest (the peel)
+          let nb = 0;
+          for (let k = -NR; k <= NR; k++) { const j = i + k; if (k && j >= 0 && j < n && (p[j] > 0 || tc[j] >= 0)) nb++; }
+          if (gam > breakerIndex(m) - 0.13 * (nb / (2 * NR))) {
+            p[i] = 0.001; this.tb[i] = this.age; this.db[i] = d;
+            this.plunge[i] = plungeIndex(m, this.Hdeep[i]);
+          }
+        } else {
+          const tau = lerp(2.0, 1.2, this.plunge[i]) * (0.8 + 0.12 * H[i]);
+          p[i] += dt / tau;
+          H[i] *= 1 + 0.06 * dt;
+          if (p[i] >= 1) { p[i] = 1; tc[i] = 0; this.zb[i] = z[i]; this.Hc[i] = H[i]; this.crashed = true; }
+        }
+      } else {
+        tc[i] += dt;
+        const k = 1 - Math.exp(-tc[i] / 1.8);
+        const Hb = clamp(0.85 * d, 0.3, 2.3) * Math.exp(-tc[i] / 22);
+        H[i] = lerp(this.Hc[i] * (1 - 0.2 * smooth(0, 0.35, tc[i])), Hb, k);  // the crash drops the wave to about half height at once, then it settles into a low bore
+      }
+    }
+    if (!anyAlive) this.dead = true;
+  }
+}
+
+// ---------- swell scheduler: one wave at a time, one every ~24 s ----------
+const Swell = {
+  t: 0, queue: [], waves: [], size: 1, nextWave: 1.5, count: 0, cur: null,
+  addWave(t0) { this.queue.push({ t: t0, H0: CFG.SET * this.size * (0.92 + 0.2 * rnd()) }); },
+  update(dt) {
+    this.t += dt;
+    if (this.t >= this.nextWave) { this.addWave(this.t); this.nextWave = this.t + CFG.GAP * (0.92 + 0.16 * rnd()); }
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const q = this.queue[i];
+      if (q.t <= this.t) {
+        const w = new Wave(q.H0, rnd() * 100); w.n = ++this.count;
+        this.waves.push(w); this.cur = w; this.queue.splice(i, 1);
+      }
+    }
+    for (const w of this.waves) w.step(dt);
+    this.waves = this.waves.filter(w => !w.dead);
+    if (this.cur && this.cur.dead) this.cur = null;
+  },
+  forceWave() { this.queue.length = 0; this.addWave(this.t + 0.01); this.nextWave = this.t + CFG.GAP; }
+};
+// ============================================================
+// RENDER — 480x270 (16:9) indexed-colour framebuffer, software rasteriser.
+// A low, close camera (yaw / height / focal length per preset) looks down the line of the wave,
+// the way a photographer in the channel would. The wave mesh (NX columns x NP profile points) is
+// projected, painted far-to-near, and shaded per pixel in wave space (height up the face, distance
+// along the crest), so the face gets the streaked, translucent look of a real one.
+// ============================================================
+const W = 480, H = 270;
+const PAL = ['#000000',
+  '#06143a', '#0a2a5c', '#0e4284', '#1560a8', '#1c82c0', '#27a6cc', '#3cc4d0', '#6adcd2', '#a2eee0', '#d6fbf0', // 1-10 water
+  '#8fb8d8', '#c4e2f0', '#eefaff', '#ffffff',                                                                    // 11-14 foam
+  '#2a50d8', '#3c70e8', '#5890f0', '#78acf4', '#9cc8f8', '#c4e0fa', '#e8f2fc',                                  // 15-21 sky
+  '#fff8c0', '#ffe878',                                                                                         // 22-23 sun
+  '#8a6a3c', '#b08a50', '#d4b070', '#ecd498',                                                                   // 24-27 sand
+  '#b8c8e8', '#1c4a58', '#2a6a6a'];                                                                             // 28 cloud shade, 29-30 island
+const PRGB = PAL.map(h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]);
+const FB = new Uint8Array(W * H);
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + 0.5) / 16);
+const NT = new Uint8Array(4096); for (let i = 0; i < 4096; i++) NT[i] = (rnd() * 256) | 0;
+let NOX = 0, NOY = 0;
+
+// ---------- camera ----------
+// x, z: position over the water (z = offshore distance); h: height above the trough plane;
+// yaw: 0 looks straight out to sea, negative turns toward -x; f: focal length in pixels; hor: horizon row.
+// The camera body never moves along the water: a director (see directCamera) pans and zooms it.
+const CAM = { x: 0, z: 8, h: 2.2, yaw: 0, f: 1700, hor: 118, s: 0, c: 1, bx: 0, bz: 8, idleYaw: 0, idleF: 1700 };
+let PDIR = 1;      // +1 when the wave peels toward +x, -1 toward -x (face water streams that way)
+let TQ = 0;        // time in 1/9 s steps: the face texture moves in pixel-art steps
+// Rigs sit ahead of the peel, on the beach, with a long lens: the break runs toward the camera and
+// the barrel opens toward it. Each rig: camera (x, z), idle aim point (tx, tz), idle focal length f,
+// and the peel direction.
+const RIGS = {
+  R: { x: 25, z: 4, h: 5, tx: -12, tz: 45, f: 460, dir: 1 },
+  L: { x: -25, z: 4, h: 5, tx: 12, tz: 45, f: 460, dir: -1 },
+  A: { x: 45, z: 4, h: 5, tx: 5, tz: 48, f: 470, dir: 1 },
+  S: { x: 45, z: 4, h: 5, tx: 0, tz: 48, f: 470, dir: 1 }
+};
+function applyCam() { CAM.s = Math.sin(CAM.yaw); CAM.c = Math.cos(CAM.yaw); CAM.x = CAM.bx; CAM.z = CAM.bz; }
+function setRig(mode) {
+  const g = RIGS[mode]; CAM.bx = g.x; CAM.bz = g.z; CAM.h = g.h; PDIR = g.dir;
+  CAM.idleYaw = Math.atan2(g.tx - g.x, g.tz - g.z); CAM.idleF = g.f;
+  CAM.yaw = CAM.idleYaw; CAM.f = g.f; applyCam();
+}
+
+// ---------- lighting: sun sits low behind the wave, so faces glow by translucency ----------
+const _l = Math.hypot(-0.35, 0.45, 0.82), LS = [-0.35 / _l, 0.45 / _l, 0.82 / _l];
+function shadeW(nx, ny, nz, vx, vy, vz, hf, d, hz) {
+  const nl = nx * LS[0] + ny * LS[1] + nz * LS[2];
+  const nv = Math.max(0, nx * vx + ny * vy + nz * vz);
+  let s = 0.08 + 0.18 * Math.max(0, nl) + 0.04 * ny + 0.13 * Math.pow(1 - nv, 3);
+  if (nl < 0) s += 1.05 * (-nl) * smooth(0.0, 0.9, hf) * (nz < 0 ? 1 : 0.5);
+  if (ny < -0.05) s *= 0.7;                // underside of the lip: the dark throat of the tube
+  s += 0.10 * smooth(4.2, 1.3, d);         // shallow water reads lighter
+  s += 0.16 * hz;                          // haze: distant water washes toward the sky
+  return clamp(s, 0, 1) * 9;
+}
+
+// ---------- per-pixel face shader ----------
+function putFace(x, y, r, u, hf, F) {
+  const n1 = NT[(((y + NOY) & 63) << 6) | ((x + NOX) & 63)] / 255;
+  if (F > 0) {
+    const n2 = NT[((((y * 3 + NOX) & 63)) << 6) | ((x * 5 + NOY) & 63)] / 255;
+    if (n2 < Math.min(1, F * 1.2)) {
+      const fb = 0.12 + 0.62 * Math.pow(hf, 0.8) + 0.18 * (r / 9) + (n1 - 0.5) * 0.6;
+      FB[y * W + x] = fb < 0.34 ? 11 : fb < 0.52 ? 12 : fb < 0.74 ? 13 : 14; return;
+    }
+  }
+  // long thin streaks that run up the face, leaning with the peel (the feathering seen on real faces)
+  // The water streams up the face (toward the lip) and slides along it in the direction of the peel,
+  // so the streaks climb at a diagonal. Sampled in wave space, stepped in time for the pixel look.
+  const ua = u - PDIR * (hf * 8) - PDIR * TQ * 6, hb = hf - TQ * 0.5;
+  const sk = NT[((((hb * 3) | 0) + ((ua * 1.3) | 0) * 5) & 63) << 6 | (((ua * 1.5 + hb * 0.8) | 0) & 63)] / 255;
+  r += (sk - 0.5) * (0.9 + 1.4 * smooth(0.2, 0.9, hf)) - 0.3 * (1 - smooth(0, 0.35, hf));
+  r += 1.4 * smooth(0.88, 1.0, hf);        // thin water at the lip lets the light through
+  const rr = r + (n1 - 0.5) * 0.4, fl = Math.floor(rr), fr = rr - fl;
+  const k = fl + (fr > BAYER[(x & 3) | ((y & 3) << 2)] ? 1 : 0);
+  FB[y * W + x] = 1 + (k < 0 ? 0 : k > 9 ? 9 : k);
+}
+
+// ---------- rasteriser: triangles from mesh vertex indices, attributes interpolated ----------
+function triF(a, b, c, r) {
+  const ax = SX[a], ay = SY[a], bx = SX[b], by = SY[b], cx = SX[c], cy = SY[c];
+  let x0 = Math.floor(Math.min(ax, bx, cx)), x1 = Math.ceil(Math.max(ax, bx, cx));
+  let y0 = Math.floor(Math.min(ay, by, cy)), y1 = Math.ceil(Math.max(ay, by, cy));
+  if (x1 < 0 || y1 < 0 || x0 >= W || y0 >= H) return;
+  if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 >= W) x1 = W - 1; if (y1 >= H) y1 = H - 1;
+  const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  if (Math.abs(area) < 1e-3) return;
+  const inv = 1 / area, e = -0.06;
+  const ua = WU[a], ub = WU[b], uc = WU[c], ha = WH[a], hb = WH[b], hc = WH[c], fa = WF[a], fb = WF[b], fc = WF[c];
+  for (let y = y0; y <= y1; y++) {
+    const py = y + 0.5;
+    for (let x = x0; x <= x1; x++) {
+      const px = x + 0.5;
+      const w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inv;
+      if (w0 < e) continue;
+      const w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inv;
+      if (w1 < e) continue;
+      const w2 = 1 - w0 - w1;
+      if (w2 < e) continue;
+      putFace(x, y, r, w0 * ua + w1 * ub + w2 * uc, w0 * ha + w1 * hb + w2 * hc, w0 * fa + w1 * fb + w2 * fc);
+    }
+  }
+}
+
+// ---------- sky: a cached vertical gradient, with sun, clouds and headland placed by compass bearing ----------
+const SKYG = new Uint8Array(W * CAM.hor);
+(function () {
+  const hor = CAM.hor;
+  for (let y = 0; y < hor; y++) for (let x = 0; x < W; x++) {
+    const v = Math.pow(y / hor, 0.9) * 6, fl = Math.floor(v), fr = v - fl;
+    SKYG[y * W + x] = 15 + clamp(fl + (fr > BAYER[(x & 3) | ((y & 3) << 2)] ? 1 : 0), 0, 6);
+  }
+})();
+const HEAD = []; for (let i = 0; i < 110; i++) { const t = i / 109; HEAD.push(Math.round(9 * Math.sin(Math.PI * Math.pow(t, 0.8)) * (0.75 + 0.25 * Math.sin(i * 0.3)))); }
+const CLOUDS = [{ az: -0.4, el: 0.19, s: 1.3 }, { az: 0.05, el: 0.27, s: 1 }, { az: 0.5, el: 0.13, s: 1.3 }, { az: -0.1, el: 0.09, s: 0.8 }, { az: 0.9, el: 0.21, s: 1 }, { az: -0.8, el: 0.16, s: 1.1 }];
+const SKYF = 420;  // sky parallax: how far the sky slides per radian of pan
+const skyX = az => W / 2 + SKYF * Math.tan(clamp(az - CAM.yaw, -1.3, 1.3));
+function drawSky(t) {
+  const hor = CAM.hor;
+  FB.set(SKYG, 0);
+  // sun, low and to the left of the idle shot
+  const sx = skyX(CAM.idleYaw - 0.2), sy = hor - SKYF * Math.tan(0.07);
+  for (let y = Math.max(0, Math.floor(sy - 15)); y < Math.min(hor, sy + 15); y++) for (let x = Math.max(0, Math.floor(sx - 15)); x < Math.min(W, sx + 15); x++) {
+    const d = Math.hypot(x - sx, (y - sy) * 1.1);
+    if (d < 5.5) FB[y * W + x] = d < 3.5 ? 22 : 23;
+    else if (d < 14 && BAYER[(x & 3) | ((y & 3) << 2)] > (d - 5.5) / 8.5) FB[y * W + x] = 21;
+  }
+  // distant headland on the horizon
+  const hx = Math.round(skyX(CAM.idleYaw + 0.32)) - 55;
+  for (let i = 0; i < HEAD.length; i++) { const x = hx + i; if (x < 0 || x >= W) continue; for (let k = 0; k < HEAD[i]; k++) FB[(hor - 1 - k) * W + x] = k > HEAD[i] - 3 ? 30 : 29; }
+  // slow clouds
+  for (const c of CLOUDS) {
+    const cx = skyX(CAM.idleYaw + c.az + t * 0.004), cy = hor - SKYF * Math.tan(c.el), w = 34 * c.s, h = 6.5 * c.s;
+    if (cx < -w - 4 || cx > W + w + 4) continue;
+    for (let dy = -h; dy <= h; dy++) for (let dx = -w; dx <= w; dx++) {
+      const bump = 1 + 0.5 * Math.sin(dx * 0.35);
+      if ((dx / w) ** 2 + (dy / (h * bump)) ** 2 > 1) continue;
+      const x = Math.round(cx + dx), y = Math.round(cy + dy);
+      if (x < 0 || x >= W || y < 0 || y >= hor - 1) continue;
+      FB[y * W + x] = dy > h * 0.3 ? 28 : dy > -h * 0.3 ? 20 : 21;
+    }
+  }
+}
+
+// ---------- ocean plane: calm and static, so the wave is the only thing that moves ----------
+function drawPlane() {
+  const hor = CAM.hor, f = CAM.f, s = CAM.s, c = CAM.c;
+  for (let y = hor; y < H; y++) {
+    const dy = y - hor + 0.5, fwd = f * CAM.h / dy;
+    const refl = 1 - smooth(0, 60, dy);          // sky reflection: pale near the horizon, deeper close in
+    const base = 2.4 + 2.0 * refl, amp = 0.3 * smooth(0, 50, dy);  // texture fades out toward the horizon
+    for (let x = 0; x < W; x++) {
+      const right = (x - W / 2) * fwd / f;
+      const X = CAM.x + right * c + fwd * s, Z = CAM.z - right * s + fwd * c;
+      const d = depth(X, Z);
+      const st = NT[((y & 63) << 6) | ((Math.floor(X * 0.18) + 1024) & 63)] / 255;
+      const r = base + 1.0 * smooth(4.2, 1.3, d) + (st - 0.5) * amp * 2;
+      const fl = Math.floor(r), fr = r - fl;
+      FB[y * W + x] = 1 + clamp(fl + (fr > BAYER[(x & 3) | ((y & 3) << 2)] ? 1 : 0), 0, 9);
+    }
+  }
+}
+
+// ---------- wave profile -> mesh ----------
+const BACKF = [0, .03, .1, .2, .32, .45, .55, .63, .71, .79, .87, .94, .98];
+const FRONTF = [1, .99, .97, .94, .9, .85, .79, .72, .64, .56, .48, .4, .32, .24, .17, .1, .05, .015, 0];
+const NB = BACKF.length, NFR = FRONTF.length, NP = NB + NFR, NXc = CFG.NX;
+const WX = new Float32Array(NXc * NP), WY = new Float32Array(NXc * NP), WZ = new Float32Array(NXc * NP);
+const WF = new Float32Array(NXc * NP), WH = new Float32Array(NXc * NP), WU = new Float32Array(NXc * NP);
+const SX = new Float32Array(NXc * NP), SY = new Float32Array(NXc * NP);
+const OK = new Uint8Array(NXc * NP), CMIN = new Float32Array(NXc), CMAX = new Float32Array(NXc);
+
+function backQ(f, Lb, thick, sp) {
+  const cosv = -Lb * Math.acos(2 * f - 1) / Math.PI, f1 = 0.55;
+  let pk;
+  if (f <= f1) pk = -(Lb - thick) * Math.acos(2 * (f / f1) - 1) / Math.PI - thick;
+  else pk = -thick * Math.pow(1 - (f - f1) / (1 - f1), 0.9);
+  return cosv + (pk - cosv) * sp;
+}
+
+function buildWave(w) {
+  const f = CAM.f, s = CAM.s, c = CAM.c, cx0 = CAM.x, cz0 = CAM.z, hor = CAM.hor, ch = CAM.h;
+  for (let i = 0; i < NXc; i++) {
+    const base = i * NP;
+    CMIN[i] = 1e9; CMAX[i] = -1e9;
+    if (!w.alive[i] || w.H[i] < 0.05) { for (let j = 0; j < NP; j++) OK[base + j] = 0; continue; }
+    const x = COLX[i], z = w.z[i], Hh = w.H[i], d = Math.max(0.5, depth(x, z));
+    const cw = Math.sqrt(CFG.G * d), Lb0 = clamp(0.5 * cw * CFG.T, 8, 55);
+    const tc = w.tc[i], p = w.p[i], broken = tc >= 0;
+    const qs = clamp(Hh / d / CFG.GAMMA, 0, 1);
+    const psiMax = lerp(1.0, 2.9, w.plunge[i]);
+    let sp, Lb, Lf, psi, Fk = 0, k = 0;
+    const Lfsteep = 0.62 * Hh + 1.0;
+    if (!broken) {
+      sp = p > 0 ? 1 : smooth(0.35, 1.0, qs);
+      Lb = Lb0; Lf = lerp(Lb0 * 0.5, Lfsteep, sp);   // front face is always steeper than the back
+      psi = psiMax * Math.pow(p, 1.5);
+    } else {
+      k = 1 - Math.exp(-tc / 1.8);
+      sp = 1 - k; Lb = Math.max(Lb0 * 0.5, Math.min(w.zb[i] - z + 6, 26));
+      Lf = lerp(Lfsteep, 1.0 * Hh + 3.5, k); psi = psiMax * (1 - k);
+      Fk = Math.exp(-tc / 11) * smooth(0, 0.5, tc);
+    }
+    const thick = 0.3 * Hh, yp = 0.45 * Hh;
+    const qC = Lf * Math.acos(2 * 0.45 - 1) / Math.PI;
+    for (let j = 0; j < NP; j++) {
+      const isB = j < NB, fr = isB ? BACKF[j] : FRONTF[j - NB];
+      let q = isB ? backQ(fr, Lb, thick, sp) : Lf * Math.acos(2 * fr - 1) / Math.PI;
+      let y = Hh * fr;
+      if (psi > 0.001 && y > yp) {
+        const a = psi * Math.pow((y - yp) / (Hh - yp), 0.8), oq = q - qC, oy = y - yp;
+        q = qC + oq * Math.cos(a) + oy * Math.sin(a);
+        y = yp - oq * Math.sin(a) + oy * Math.cos(a);
+      }
+      if (y < 0.02) y = 0.02;
+      let Fv = 0;
+      if (broken) Fv = isB ? Fk * Math.pow(Math.max(0, 1 - Math.abs(q) / Lb), 2.4) : Fk * smooth(0, 0.4, fr);
+      else if (p > 0) Fv = (1 - w.plunge[i]) * smooth(0.78, 1, fr) * 0.85;
+      const idx = base + j, Zo = z - q;
+      WX[idx] = x; WY[idx] = y; WZ[idx] = Zo; WF[idx] = Fv; WU[idx] = i;
+      WH[idx] = Hh > 0.01 ? clamp(y / Hh, 0, 1.2) : 0;
+      const rx = x - cx0, rz = Zo - cz0, fwd = rx * s + rz * c;
+      if (fwd < 1.5) { OK[idx] = 0; continue; }
+      const sx = W / 2 + f * (rx * c - rz * s) / fwd;
+      SX[idx] = sx; SY[idx] = hor + f * (ch - y) / fwd; OK[idx] = 1;
+      if (sx < CMIN[i]) CMIN[i] = sx; if (sx > CMAX[i]) CMAX[i] = sx;
+    }
+  }
+}
+
+function drawWaveMesh(w, fxb) {
+  const cxp = CAM.x, czp = CAM.z, chp = CAM.h, asc = CAM.s <= 0.05;
+  for (let n = 0; n < NXc - 1; n++) {
+    const i = asc ? n : NXc - 2 - n;          // far columns first
+    if (Math.max(CMAX[i], CMAX[i + 1]) < -4 || Math.min(CMIN[i], CMIN[i + 1]) > W + 4) continue;
+    for (let j = 0; j < NP - 1; j++) {
+      const a = i * NP + j, b = (i + 1) * NP + j, c2 = (i + 1) * NP + j + 1, d2 = i * NP + j + 1;
+      if (!(OK[a] & OK[b] & OK[c2] & OK[d2])) continue;
+      const e1x = WX[b] - WX[a], e1y = WY[b] - WY[a], e1z = WZ[b] - WZ[a];
+      const e2x = WX[d2] - WX[a], e2y = WY[d2] - WY[a], e2z = WZ[d2] - WZ[a];
+      let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+      const nl = Math.hypot(nx, ny, nz);
+      if (nl < 1e-9) continue;
+      nx /= nl; ny /= nl; nz /= nl;
+      const mx = (WX[a] + WX[c2]) * 0.5, my = (WY[a] + WY[c2]) * 0.5, mz = (WZ[a] + WZ[c2]) * 0.5;
+      let vx = cxp - mx, vy = chp - my, vz = czp - mz;
+      const vl = Math.hypot(vx, vy, vz); vx /= vl; vy /= vl; vz /= vl;
+      const hf = (WH[a] + WH[c2]) * 0.5;
+      const r = shadeW(nx, ny, nz, vx, vy, vz, hf, depth(mx, mz), smooth(45, 170, vl));
+      triF(a, b, c2, r); triF(a, c2, d2, r);
+    }
+    const fl = fxb[i]; if (fl) for (const it of fl) it.age !== undefined ? drawPuff(it) : drawSprayPt(it);
+  }
+}
+
+// ---------- pre-generated whitewater sprites (the "masking" assets) ----------
+const PUFF_R = [3, 5, 8, 12, 17, 24, 34, 48];
+const PUFF = PUFF_R.map(R0 => {
+  const frames = [];
+  for (let fr = 0; fr < 6; fr++) {
+    const R = Math.round(R0 * (0.55 + 0.1 * fr)), S = 2 * R + 3, data = new Uint8Array(S * S).fill(255);
+    const blobs = []; for (let b = 0; b < 9; b++) blobs.push([(rnd() - 0.5) * R * 1.2, -rnd() * R * 0.6 * (fr * 0.18 + 0.4), R * (0.3 + rnd() * 0.4)]);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const px = x - R - 1, py = y - R - 1; let best = 9;
+      for (const bl of blobs) { const dd = Math.hypot(px - bl[0], py - bl[1]) / bl[2]; if (dd < best) best = dd; }
+      if (best > 1) continue;
+      if (rnd() < fr * 0.11 + (best > 0.75 ? 0.35 : 0)) continue;
+      data[y * S + x] = py > R * 0.2 ? 11 : best < 0.5 ? 14 : best < 0.8 ? 13 : 12;
+    }
+    frames.push({ S, data });
+  }
+  return frames;
+});
+const puffs = [], spray = [];
+function stamp(spr, cx, cy) {
+  const o = Math.floor(spr.S / 2);
+  for (let y = 0; y < spr.S; y++) for (let x = 0; x < spr.S; x++) {
+    const v = spr.data[y * spr.S + x]; if (v === 255) continue;
+    const X = Math.round(cx) + x - o, Y = Math.round(cy) + y - o;
+    if (X >= 0 && X < W && Y >= 0 && Y < H) FB[Y * W + X] = v;
+  }
+}
+function spawnCrash(x, z, Hc, plunge, w, ci) {
+  puffs.push({ w, ci, X: x, Y: Hc * 0.3, Z: z - 0.8, age: 0, size: Hc * (0.3 + 0.22 * plunge), life: 0.7 + rnd() * 0.3 });
+  const n = 3 + (plunge * 3 | 0);
+  for (let k = 0; k < n; k++) spray.push({ w, ci, X: x + (rnd() - 0.5) * 1.5, Y: 0.4 + rnd() * Hc * 0.4, Z: z - 0.5, vx: (rnd() - 0.5) * 2, vy: 2.5 + rnd() * 5.5, vz: -(1 + rnd() * 5), life: 0.8 + rnd() * 0.9 });
+}
+function updateFx(dt) {
+  for (const p of puffs) p.age += dt;
+  for (let i = puffs.length - 1; i >= 0; i--) if (puffs[i].age > puffs[i].life) puffs.splice(i, 1);
+  for (const s of spray) { s.life -= dt; s.vy -= 9.8 * dt; s.X += s.vx * dt; s.Y += s.vy * dt; s.Z += s.vz * dt; }
+  for (let i = spray.length - 1; i >= 0; i--) if (spray[i].life <= 0 || spray[i].Y < 0) spray.splice(i, 1);
+  if (spray.length > 1200) spray.splice(0, spray.length - 1200);
+}
+const PJ = { sx: 0, sy: 0, fwd: 0 };
+function projPt(X, Y, Z) {
+  const rx = X - CAM.x, rz = Z - CAM.z, fwd = rx * CAM.s + rz * CAM.c;
+  PJ.fwd = fwd; if (fwd < 1.5) return false;
+  PJ.sx = W / 2 + CAM.f * (rx * CAM.c - rz * CAM.s) / fwd; PJ.sy = CAM.hor + CAM.f * (CAM.h - Y) / fwd; return true;
+}
+function drawPuff(p) {
+  if (!projPt(p.X, p.Y, p.Z)) return;
+  const Rpx = p.size * CAM.f / PJ.fwd * 0.5;
+  let ci = 0; while (ci < PUFF_R.length - 1 && PUFF_R[ci] < Rpx) ci++;
+  const fr = Math.min(5, Math.floor(p.age / p.life * 6));
+  stamp(PUFF[ci][fr], PJ.sx, PJ.sy);
+}
+function drawSprayPt(s) {
+  if (!projPt(s.X, s.Y, s.Z)) return;
+  const x = Math.round(PJ.sx), y = Math.round(PJ.sy);
+  if (x < 0 || x >= W - 2 || y < 0 || y >= H - 2) return;
+  FB[y * W + x] = 14; if (PJ.fwd < 90 && s.life > 0.3) { FB[y * W + x + 1] = 13; if (PJ.fwd < 40) { FB[(y + 1) * W + x] = 13; FB[(y + 1) * W + x + 1] = 12; } }
+}
+// bucket a wave's puffs and spray by column, so each is painted right after its own column
+function fxBuckets(w) {
+  const b = new Array(NXc);
+  for (const p of puffs) if (p.w === w) (b[p.ci] || (b[p.ci] = [])).push(p);
+  for (const q of spray) if (q.w === w) (b[q.ci] || (b[q.ci] = [])).push(q);
+  return b;
+}
+
+function renderScene(t, waves) {
+  NOX = Math.floor(t * 7) * 5; NOY = Math.floor(t * 7) * 3; TQ = Math.floor(t * 9) / 9;
+  drawSky(t); drawPlane();
+  const depthKey = w => { let sum = 0, n = 0; for (let i = 0; i < NXc; i += 8) if (w.alive[i]) { sum += COLX[i] * CAM.s + w.z[i] * CAM.c; n++; } return n ? sum / n : -1e9; };
+  const order = waves.map(w => [depthKey(w), w]).sort((a, b) => b[0] - a[0]);
+  const live = new Set(waves);
+  for (const [, w] of order) { buildWave(w); drawWaveMesh(w, fxBuckets(w)); }
+  for (const p of puffs) if (!live.has(p.w)) drawPuff(p);          // leftovers from waves that have gone
+  for (const q of spray) if (!live.has(q.w)) drawSprayPt(q);
+}
+setRig('R');
+function present(ctx, img) {
+  const d = img.data;
+  for (let i = 0; i < W * H; i++) { const c = PRGB[FB[i]]; d[i * 4] = c[0]; d[i * 4 + 1] = c[1]; d[i * 4 + 2] = c[2]; d[i * 4 + 3] = 255; }
+  ctx.putImageData(img, 0, 0);
+}
+// ============================================================
+// MAIN — loop, controls, data (plan) view
+// ============================================================
+const cv = document.getElementById('scr'), ctx = cv.getContext('2d');
+const img = ctx.createImageData(W, H);
+const pv = document.getElementById('plan'), pctx = pv.getContext('2d');
+const PW = 192, PH = 108, pimg = pctx.createImageData(PW, PH);
+let paused = false, simT = 0, showPlan = false, speed = 1;
+
+function simStep(dt) {
+  Swell.update(dt);
+  for (const w of Swell.waves) for (let i = 0; i < CFG.NX; i++) {
+    if (w.tc[i] === 0) { if (i % 6 === 0) spawnCrash(COLX[i], w.z[i], w.Hc[i], w.plunge[i], w, i); }
+    else if (w.tc[i] < 0 && i % 3 === 0 && w.alive[i]) {
+      if (w.p[i] > 0.1 && rnd() < 0.05) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.97, Z: w.z[i] - 1.2, vx: (rnd() - 0.5) * 1.5, vy: 0.5 + rnd() * 2.5, vz: -(0.5 + rnd() * 3), life: 0.35 + rnd() * 0.5 });
+      else if (w.H[i] > 1.8 && rnd() < 0.012) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.99, Z: w.z[i] + 0.3, vx: (rnd() - 0.5), vy: 0.2 + rnd() * 1.2, vz: 1 + rnd() * 2.5, life: 0.4 + rnd() * 0.6 });
+    }
+    else if (w.tc[i] > 0.3 && w.tc[i] < 3 && rnd() < 0.004) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.8, Z: w.z[i], vx: (rnd() - 0.5), vy: 1 + rnd() * 2.5, vz: -rnd() * 2, life: 0.5 + rnd() * 0.5 });
+  }
+  updateFx(dt); simT += dt;
+  directCamera(dt);
+}
+
+// Fixed camera: the whole peel is framed by the rig, nothing pans or zooms.
+function directCamera(dt) { applyCam(); }
+
+function drawPlan() {
+  const d = pimg.data;
+  for (let py = 0; py < PH; py++) for (let px = 0; px < PW; px++) {
+    const X = -CFG.XR + px / PW * 2 * CFG.XR, Z = (1 - py / PH) * 215;
+    const dp = depth(X, Z), s = clamp(1 - dp / 9, 0, 1), o = (py * PW + px) * 4;
+    d[o] = 8 + 40 * s * s; d[o + 1] = 30 + 150 * s; d[o + 2] = 70 + 130 * s * 0.9; d[o + 3] = 255;
+  }
+  pctx.putImageData(pimg, 0, 0);
+  for (const w of Swell.waves) for (let i = 0; i < CFG.NX; i++) {
+    if (!w.alive[i]) continue;
+    const px = (i / (CFG.NX - 1)) * PW, py = (1 - w.z[i] / 215) * PH;
+    pctx.fillStyle = w.tc[i] >= 0 ? '#ffffff' : w.p[i] > 0 ? '#ffe878' : '#55ffff';
+    pctx.fillRect(px, py, 1.6, 1.6);
+  }
+  const cpx = clamp((CAM.x + CFG.XR) / (2 * CFG.XR) * PW, 3, PW - 3), cpy = clamp((1 - CAM.z / 215) * PH, 3, PH - 3);
+  pctx.strokeStyle = '#ff55ff'; pctx.beginPath(); pctx.moveTo(cpx, cpy); pctx.lineTo(cpx + CAM.s * 14, cpy - CAM.c * 14 * (PH / 215) * (215 / PW) * 0.5); pctx.stroke();
+  pctx.fillStyle = '#ff55ff'; pctx.fillRect(cpx - 2, cpy - 2, 4, 4);
+}
+
+// Peel angle, measured from the sim rather than scripted. The break point travels along the crest
+// while the crest itself advances at c, so the break's trail sits at atan(c / v_peel) to the crest
+// (v_peel = 1 / slope of break-start time along the crest). Near 0 the whole wave goes at once
+// (closeout); the rider's speed along the trail is c / sin(angle).
+function peelStats(w) {
+  const n = CFG.NX, a = [];
+  let dir = 0, act = 0, pl = 0;
+  for (let i = PR; i < n - PR; i++) {
+    if (w.p[i] > 0 && w.tc[i] < 3) act++;
+    if (w.tb[i - PR] < 0 || w.tb[i + PR] < 0) continue;
+    const sl = (w.tb[i + PR] - w.tb[i - PR]) / (2 * PR * DX); // seconds per metre along the crest
+    a.push(Math.atan(Math.sqrt(CFG.G * w.db[i]) * Math.abs(sl)) * 180 / Math.PI);
+    dir += sl; pl += w.plunge[i];
+  }
+  if (a.length < 4) return { act, alpha: null };
+  a.sort((x, y) => x - y);
+  const alpha = a[a.length >> 1];
+  return { act, alpha, dir, plunge: pl / a.length, tag: alpha < 18 ? 'CLOSEOUT' : alpha > 65 ? 'SLOW' : 'PEELING' };
+}
+const hud = document.getElementById('hud');
+function updateHud() {
+  const w = Swell.cur;
+  let best = null, bn = 3;
+  for (const v of Swell.waves) { const ps = peelStats(v); if (ps.alpha !== null && ps.act > bn) { best = ps; bn = ps.act; } }
+  const peel = best ? best.alpha.toFixed(0) + 'DEG ' + (best.dir > 0 ? '>>' : '<<') + ' ' + best.tag + ' ' + (best.plunge < 0.35 ? 'SPILLING' : best.plunge < 0.7 ? 'CURLING' : 'PLUNGING') : 'NO BREAK';
+  hud.textContent = 'WAVE ' + Swell.count + '  ·  ' + (w ? w.H0.toFixed(1) : '0.0') + 'M  ·  PEEL ' + peel;
+}
+
+let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!paused) { acc += dt * speed; let n = 0; while (acc >= 1 / 60 && n++ < 6) { simStep(1 / 60); acc -= 1 / 60; } }
+  CAM.h = 2.2 + 0.04 * Math.sin(simT * 0.5);
+  renderScene(simT, Swell.waves); present(ctx, img);
+  if (showPlan) drawPlan();
+  updateHud();
+  requestAnimationFrame(frame);
+}
+
+// controls
+const $ = id => document.getElementById(id);
+function setPause(v) { paused = v; $('bPause').textContent = paused ? 'Play' : 'Pause'; }
+$('bPause').onclick = () => setPause(!paused);
+$('bSet').onclick = () => Swell.forceWave();
+$('bPlan').onclick = () => { showPlan = !showPlan; pv.hidden = !showPlan; $('bPlan').setAttribute('aria-pressed', showPlan); };
+$('bSpeed').onclick = () => { speed = speed === 1 ? 0.35 : speed === 0.35 ? 2 : 1; $('bSpeed').textContent = 'Speed ' + (speed === 1 ? '1x' : speed === 2 ? '2x' : 'Slow'); };
+const REEF_NAMES = { R: 'Peels left to right', L: 'Peels right to left', A: 'A-frame', S: 'Closeout sandbar' };
+$('bReef').onclick = () => {
+  const m = { R: 'L', L: 'A', A: 'S', S: 'R' }[REEF.mode]; setReef(m); setRig(m); $('bReef').textContent = REEF_NAMES[m];
+  Swell.waves.length = 0; Swell.queue.length = 0; Swell.cur = null; puffs.length = 0; spray.length = 0; Swell.forceWave();
+};
+$('bBig').onclick = () => { Swell.size = Math.min(1.5, Swell.size + 0.15); $('size').textContent = (CFG.SET * Swell.size).toFixed(1) + ' m'; };
+$('bSmall').onclick = () => { Swell.size = Math.max(0.5, Swell.size - 0.15); $('size').textContent = (CFG.SET * Swell.size).toFixed(1) + ' m'; };
+addEventListener('keydown', e => {
+  if (e.key === ' ') { setPause(!paused); e.preventDefault(); }
+  else if (e.key === 's') Swell.forceWave(); else if (e.key === 'd') $('bPlan').click();
+});
+window.__test = { simStep, directCamera, peelStats, setReef, setRig, applyCam, RIGS, CAM, depth, slopeAt, REEF, render() { renderScene(simT, Swell.waves); present(ctx, img); if (showPlan) drawPlan(); }, Swell };
+if (!window.__noloop) requestAnimationFrame(frame);
+</script>
+
+</body></html>
