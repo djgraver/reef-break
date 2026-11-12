@@ -14,4 +14,6 @@ Space: pause. S: send a wave. D: data view (crest lines over seabed depth). Butt
 
 ## Status
 
-Version 5: fixed beach camera, reshaped wave, longer whitewater. Next up: tune barrel thickness, add a deeper tube, then add the surfer riding the line.
+**v1** (current): fixed beach camera, four reef presets, a tuned barrel (plunging waves pivot lower and throw a thicker lip, so the tube is deeper and stays open longer), and longer-lasting whitewater.
+
+**v2** (next): the surfer riding the line.

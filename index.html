@@ -127,7 +127,7 @@ const breakerIndex = m => clamp(CFG.GAMMA + 2.0 * (m - 0.095), 0.65, 1.0);
 // below ~0.5 spilling, ~0.5-3.3 plunging, above that surging. Our slopes sit in the spilling-to-plunging
 // span, so that span is mapped to 0 (spilling) .. 1 (hard plunging).
 const L0 = CFG.G * CFG.T * CFG.T / (2 * Math.PI);
-const plungeIndex = (m, H0) => smooth(0.45, 1.35, m / Math.sqrt(Math.max(0.2, H0) / L0));
+const plungeIndex = (m, H0) => smooth(0.35, 1.15, m / Math.sqrt(Math.max(0.2, H0) / L0));
 setReef('R');
 
 // ---------- waves ----------
@@ -192,7 +192,7 @@ class Wave {
             this.plunge[i] = plungeIndex(m, this.Hdeep[i]);
           }
         } else {
-          const tau = lerp(2.0, 1.2, this.plunge[i]) * (0.8 + 0.12 * H[i]);
+          const tau = lerp(2.0, 1.7, this.plunge[i]) * (0.8 + 0.12 * H[i]);  // a plunging lip stays open longer: a longer-lived barrel
           p[i] += dt / tau;
           H[i] *= 1 + 0.06 * dt;
           if (p[i] >= 1) { p[i] = 1; tc[i] = 0; this.zb[i] = z[i]; this.Hc[i] = H[i]; this.crashed = true; }
@@ -419,7 +419,7 @@ function buildWave(w) {
     const cw = Math.sqrt(CFG.G * d), Lb0 = clamp(0.5 * cw * CFG.T, 8, 55);
     const tc = w.tc[i], p = w.p[i], broken = tc >= 0;
     const qs = clamp(Hh / d / CFG.GAMMA, 0, 1);
-    const psiMax = lerp(1.0, 2.9, w.plunge[i]);
+    const psiMax = lerp(1.0, 3.1, w.plunge[i]);
     let sp, Lb, Lf, psi, Fk = 0, k = 0;
     const Lfsteep = 0.62 * Hh + 1.0;
     if (!broken) {
@@ -432,14 +432,20 @@ function buildWave(w) {
       Lf = lerp(Lfsteep, 1.0 * Hh + 3.5, k); psi = psiMax * (1 - k);
       Fk = Math.exp(-tc / 11) * smooth(0, 0.5, tc);
     }
-    const thick = 0.3 * Hh, yp = 0.45 * Hh;
-    const qC = Lf * Math.acos(2 * 0.45 - 1) / Math.PI;
+    // Barrel shape: a plunging wave pivots lower on the face, so the curl is a bigger circle (a deeper
+    // tube); the lip is thicker where it is thrown, and the whole curl is scaled up while it is open.
+    const pl = w.plunge[i], pf = psiMax > 0 ? psi / psiMax : 0;
+    const FP = lerp(0.45, 0.34, pl), thick = lerp(0.3, 0.4, pl * pf) * Hh, yp = FP * Hh;
+    const rs = 1 + 0.55 * pl * pf, ex = lerp(0.8, 0.6, pl);
+    const qC = Lf * Math.acos(2 * FP - 1) / Math.PI;
     for (let j = 0; j < NP; j++) {
       const isB = j < NB, fr = isB ? BACKF[j] : FRONTF[j - NB];
       let q = isB ? backQ(fr, Lb, thick, sp) : Lf * Math.acos(2 * fr - 1) / Math.PI;
       let y = Hh * fr;
       if (psi > 0.001 && y > yp) {
-        const a = psi * Math.pow((y - yp) / (Hh - yp), 0.8), oq = q - qC, oy = y - yp;
+        // only the crest cap curls over: on the back slope the rotation fades out with distance behind the crest
+        const wB = isB ? Math.exp(-Math.pow(-q / (0.9 * Hh), 2)) : 1, sc = 1 + (rs - 1) * wB;
+        const a = psi * wB * Math.pow((y - yp) / (Hh - yp), ex), oq = (q - qC) * sc, oy = (y - yp) * sc;
         q = qC + oq * Math.cos(a) + oy * Math.sin(a);
         y = yp - oq * Math.sin(a) + oy * Math.cos(a);
       }
