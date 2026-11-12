@@ -172,10 +172,11 @@ class Wave {
     for (let i = 0; i < n; i++) {
       if (!this.alive[i]) continue;
       z[i] = zn[i];
-      if (z[i] < CFG.ZCAM + 13) { this.alive[i] = 0; H[i] = 0; continue; }
+      const zEnd = CFG.ZCAM + (tc[i] >= 0 ? 7 : 13);   // an unbroken wave ends at the shore; broken water keeps running in as whitewater
+      if (z[i] < zEnd) { this.alive[i] = 0; H[i] = 0; continue; }
       anyAlive = true;
       const x = COLX[i], d = Math.max(0.5, depth(x, z[i]));
-      const runup = Math.max(0.3, (z[i] - (CFG.ZCAM + 13)) * 0.3);  // the wave runs out onto the shore instead of being cut off
+      const runup = Math.max(0.3, (z[i] - zEnd) * 0.3);  // the wave runs out onto the shore instead of being cut off
       if (H[i] > runup) H[i] = runup;
       if (tc[i] < 0) {
         // shoaling (Green's law) plus focusing where the crest bends concave toward shore
@@ -201,7 +202,7 @@ class Wave {
         tc[i] += dt;
         const k = 1 - Math.exp(-tc[i] / 1.8);
         const Hb = clamp(0.85 * d, 0.3, 2.3) * Math.exp(-tc[i] / 22);
-        H[i] = lerp(this.Hc[i] * (1 - 0.2 * smooth(0, 0.35, tc[i])), Hb, k);  // the crash drops the wave to about half height at once, then it settles into a low bore
+        H[i] = lerp(this.Hc[i] * (1 - 0.38 * smooth(0, 0.6, tc[i])), Hb, k);  // the crash drops the wave to about half height at once, then it settles into a low bore
       }
     }
     if (!anyAlive) this.dead = true;
@@ -237,7 +238,7 @@ const Swell = {
 // ============================================================
 const W = 480, H = 270;
 const PAL = ['#000000',
-  '#06143a', '#0a2a5c', '#0e4284', '#1560a8', '#1c82c0', '#27a6cc', '#3cc4d0', '#6adcd2', '#a2eee0', '#d6fbf0', // 1-10 water
+  '#041233', '#08284f', '#0c4070', '#10588a', '#1672a0', '#1f8ca2', '#36aa9e', '#64c8a4', '#9fe2ba', '#d6f8d8', // 1-10 water: deep navy face to a glowing green-turquoise where light comes through the lip
   '#8fb8d8', '#c4e2f0', '#eefaff', '#ffffff',                                                                    // 11-14 foam
   '#2a50d8', '#3c70e8', '#5890f0', '#78acf4', '#9cc8f8', '#c4e0fa', '#e8f2fc',                                  // 15-21 sky
   '#fff8c0', '#ffe878',                                                                                         // 22-23 sun
@@ -279,7 +280,9 @@ function shadeW(nx, ny, nz, vx, vy, vz, hf, d, hz) {
   const nv = Math.max(0, nx * vx + ny * vy + nz * vz);
   let s = 0.08 + 0.18 * Math.max(0, nl) + 0.04 * ny + 0.13 * Math.pow(1 - nv, 3);
   if (nl < 0) s += 1.05 * (-nl) * smooth(0.0, 0.9, hf) * (nz < 0 ? 1 : 0.5);
-  if (ny < -0.05) s *= 0.7;                // underside of the lip: the dark throat of the tube
+  // inside the tube: dark deep in the throat, but the sun comes through the thin lip, so the water
+  // toward the lip glows green-turquoise (the brightest part of a real barrel photo)
+  if (ny < -0.05) s = s * 0.55 + 0.62 * smooth(0.5, 1.0, hf) * (0.6 + 0.4 * Math.min(1, -ny * 2));
   s += 0.10 * smooth(4.2, 1.3, d);         // shallow water reads lighter
   s += 0.16 * hz;                          // haze: distant water washes toward the sky
   return clamp(s, 0, 1) * 9;
@@ -291,7 +294,9 @@ function putFace(x, y, r, u, hf, F) {
   if (F > 0) {
     const n2 = NT[((((y * 3 + NOX) & 63)) << 6) | ((x * 5 + NOY) & 63)] / 255;
     if (n2 < Math.min(1, F * 1.2)) {
-      const fb = 0.12 + 0.62 * Math.pow(hf, 0.8) + 0.18 * (r / 9) + (n1 - 0.5) * 0.6;
+      // clumpy foam: blotches sampled in wave space (so they travel with the wave) shade it from bright tops to blue-grey hollows
+      const cl = NT[((((hf * 7) | 0) + ((u * 0.9) | 0) * 7) & 63) << 6 | ((((u * 0.55 + hf * 4) | 0)) & 63)] / 255;
+      const fb = 0.05 + 0.55 * Math.pow(hf, 0.8) + 0.18 * (r / 9) + (n1 - 0.5) * 0.7 + (cl - 0.5) * 0.75;
       FB[y * W + x] = fb < 0.34 ? 11 : fb < 0.52 ? 12 : fb < 0.74 ? 13 : 14; return;
     }
   }
@@ -302,6 +307,9 @@ function putFace(x, y, r, u, hf, F) {
   const sk = NT[((((hb * 3) | 0) + ((ua * 1.3) | 0) * 5) & 63) << 6 | (((ua * 1.5 + hb * 0.8) | 0) & 63)] / 255;
   r += (sk - 0.5) * (0.9 + 1.4 * smooth(0.2, 0.9, hf)) - 0.3 * (1 - smooth(0, 0.35, hf));
   r += 1.4 * smooth(0.88, 1.0, hf);        // thin water at the lip lets the light through
+  // fine wind chop on the face, and sun glints on it: bright speckle that is stronger toward the top
+  r += (n1 - 0.5) * 0.5 * smooth(0.05, 0.5, hf);
+  if (n1 > 0.955) r += 1.3 * smooth(0.25, 0.8, hf);
   const rr = r + (n1 - 0.5) * 0.4, fl = Math.floor(rr), fr = rr - fl;
   const k = fl + (fr > BAYER[(x & 3) | ((y & 3) << 2)] ? 1 : 0);
   FB[y * W + x] = 1 + (k < 0 ? 0 : k > 9 ? 9 : k);
@@ -429,13 +437,13 @@ function buildWave(w) {
     } else {
       k = 1 - Math.exp(-tc / 1.8);
       sp = 1 - k; Lb = Math.max(Lb0 * 0.5, Math.min(w.zb[i] - z + 6, 26));
-      Lf = lerp(Lfsteep, 1.0 * Hh + 3.5, k); psi = psiMax * (1 - k);
-      Fk = Math.exp(-tc / 11) * smooth(0, 0.5, tc);
+      Lf = lerp(Lfsteep, 1.0 * Hh + 3.5, k); psi = psiMax * Math.exp(-tc / 0.7);   // the lip lands within a second instead of unrolling backwards
+      Fk = Math.exp(-tc / 15) * smooth(0, 0.35, tc);
     }
     // Barrel shape: a plunging wave pivots lower on the face, so the curl is a bigger circle (a deeper
     // tube); the lip is thicker where it is thrown, and the whole curl is scaled up while it is open.
     const pl = w.plunge[i], pf = psiMax > 0 ? psi / psiMax : 0;
-    const FP = lerp(0.45, 0.34, pl), thick = lerp(0.3, 0.4, pl * pf) * Hh, yp = FP * Hh;
+    const FP = lerp(0.45, 0.34, pl), thick = lerp(0.3, 0.55, pl * pf) * Hh, yp = FP * Hh;
     const rs = 1 + 0.55 * pl * pf, ex = lerp(0.8, 0.6, pl);
     const qC = Lf * Math.acos(2 * FP - 1) / Math.PI;
     for (let j = 0; j < NP; j++) {
@@ -444,7 +452,7 @@ function buildWave(w) {
       let y = Hh * fr;
       if (psi > 0.001 && y > yp) {
         // only the crest cap curls over: on the back slope the rotation fades out with distance behind the crest
-        const wB = isB ? Math.exp(-Math.pow(-q / (0.9 * Hh), 2)) : 1, sc = 1 + (rs - 1) * wB;
+        const wB = isB ? Math.exp(-Math.pow(-q / (1.3 * Hh), 2)) : 1, sc = 1 + (rs - 1) * wB;
         const a = psi * wB * Math.pow((y - yp) / (Hh - yp), ex), oq = (q - qC) * sc, oy = (y - yp) * sc;
         q = qC + oq * Math.cos(a) + oy * Math.sin(a);
         y = yp - oq * Math.sin(a) + oy * Math.cos(a);
@@ -525,7 +533,7 @@ function spawnCrash(x, z, Hc, plunge, w, ci) {
 function updateFx(dt) {
   for (const p of puffs) p.age += dt;
   for (let i = puffs.length - 1; i >= 0; i--) if (puffs[i].age > puffs[i].life) puffs.splice(i, 1);
-  for (const s of spray) { s.life -= dt; s.vy -= 9.8 * dt; s.X += s.vx * dt; s.Y += s.vy * dt; s.Z += s.vz * dt; }
+  for (const s of spray) { s.life -= dt; s.vy -= (s.m ? 1.2 : 9.8) * dt; s.X += s.vx * dt; s.Y += s.vy * dt; s.Z += s.vz * dt; }
   for (let i = spray.length - 1; i >= 0; i--) if (spray[i].life <= 0 || spray[i].Y < 0) spray.splice(i, 1);
   if (spray.length > 1200) spray.splice(0, spray.length - 1200);
 }
@@ -546,6 +554,16 @@ function drawSprayPt(s) {
   if (!projPt(s.X, s.Y, s.Z)) return;
   const x = Math.round(PJ.sx), y = Math.round(PJ.sy);
   if (x < 0 || x >= W - 2 || y < 0 || y >= H - 2) return;
+  if (s.m) {                                // mist: a soft dithered blob that grows and thins as it drifts
+    const R = clamp(170 / PJ.fwd * (1 + 0.7 * (1 - s.life / s.l0)), 1, 5), dens = 0.62 * Math.min(1, s.life / (0.55 * s.l0));
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      if (dx * dx + dy * dy > R * R) continue;
+      const X = x + dx, Y = y + dy; if (X < 0 || X >= W || Y < 0 || Y >= H) continue;
+      if (NT[((((Y * 7 + NOY) & 63)) << 6) | ((X * 5 + NOX) & 63)] / 255 < dens * (1 - 0.6 * Math.hypot(dx, dy) / (R + 0.5))) FB[Y * W + X] = NT[((((Y + 17) & 63)) << 6) | ((X + 31) & 63)] > 150 ? 14 : 13;
+    }
+    return;
+  }
+  if (s.life < 0.3 && ((x + y + (s.life * 40 | 0)) & 1)) return;   // spray thins out as it fades
   FB[y * W + x] = 14; if (PJ.fwd < 90 && s.life > 0.3) { FB[y * W + x + 1] = 13; if (PJ.fwd < 40) { FB[(y + 1) * W + x] = 13; FB[(y + 1) * W + x + 1] = 12; } }
 }
 // bucket a wave's puffs and spray by column, so each is painted right after its own column
@@ -587,7 +605,9 @@ function simStep(dt) {
     if (w.tc[i] === 0) { if (i % 6 === 0) spawnCrash(COLX[i], w.z[i], w.Hc[i], w.plunge[i], w, i); }
     else if (w.tc[i] < 0 && i % 3 === 0 && w.alive[i]) {
       if (w.p[i] > 0.1 && rnd() < 0.05) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.97, Z: w.z[i] - 1.2, vx: (rnd() - 0.5) * 1.5, vy: 0.5 + rnd() * 2.5, vz: -(0.5 + rnd() * 3), life: 0.35 + rnd() * 0.5 });
-      else if (w.H[i] > 1.8 && rnd() < 0.012) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.99, Z: w.z[i] + 0.3, vx: (rnd() - 0.5), vy: 0.2 + rnd() * 1.2, vz: 1 + rnd() * 2.5, life: 0.4 + rnd() * 0.6 });
+      // offshore wind blows a plume of mist back off the lip of a breaking wave; a steep unbroken crest sheds a thinner veil
+      if (w.p[i] > 0.05 && rnd() < 0.16) { const l0 = 1.1 + rnd() * 1.2; spray.push({ w, ci: i, m: 1, l0, X: COLX[i] + (rnd() - 0.5) * 1.2, Y: w.H[i] * (0.95 + 0.1 * rnd()), Z: w.z[i] - 0.4, vx: -PDIR * rnd() * 0.8, vy: 1.6 + rnd() * 3.2, vz: 1.2 + rnd() * 3.2, life: l0 }); }
+      else if (w.H[i] > 1.8 && rnd() < 0.012 + 0.02 * smooth(0.5, 1, w.H[i] / Math.max(0.5, depth(COLX[i], w.z[i])))) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.99, Z: w.z[i] + 0.3, vx: (rnd() - 0.5), vy: 0.2 + rnd() * 1.2, vz: 1.5 + rnd() * 3, life: 0.4 + rnd() * 0.7 });
     }
     else if (w.tc[i] > 0.3 && w.tc[i] < 3 && rnd() < 0.004) spray.push({ w, ci: i, X: COLX[i], Y: w.H[i] * 0.8, Z: w.z[i], vx: (rnd() - 0.5), vy: 1 + rnd() * 2.5, vz: -rnd() * 2, life: 0.5 + rnd() * 0.5 });
   }

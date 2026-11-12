@@ -14,6 +14,12 @@ Space: pause. S: send a wave. D: data view (crest lines over seabed depth). Butt
 
 ## Status
 
-**v1** (current): fixed beach camera, four reef presets, a tuned barrel (plunging waves pivot lower and throw a thicker lip, so the tube is deeper and stays open longer), and longer-lasting whitewater.
+Branch `v1` holds the first tuned version (deeper barrel, longer-lived whitewater). `main` is v2.
 
-**v2** (next): the surfer riding the line.
+**v2** (current): a more realistic wave, built from real barrel photos.
+- The tube interior glows green-turquoise where sunlight comes through the lip, over a deep navy face.
+- A thicker, rounder lip, and a curl that scales up with how hard the wave plunges.
+- Wind mist blows off the lip as soft, drifting, fading plumes; the face has fine chop and sun glints.
+- The lip lands and splashes within a second, and broken water keeps rolling in as clumpy whitewater instead of vanishing.
+
+**Next**: gameplay (the surfer riding the line) comes after the wave.
