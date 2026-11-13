@@ -23,3 +23,7 @@ Branch `v1` holds the first tuned version (deeper barrel, longer-lived whitewate
 - The lip lands and splashes within a second, and broken water keeps rolling in as clumpy whitewater instead of vanishing.
 
 **Next**: gameplay (the surfer riding the line) comes after the wave.
+
+## Study 1 (restart, wave only)
+
+`study-1/` is a fresh take on the wave alone, with a different approach: a rolled-sheet profile (flat sea, straight ramp, gradually tightening spiral up and over the lip), a bigger impact explosion, rolling whitewater tail, and flowing water. See `study-1/README.md`.

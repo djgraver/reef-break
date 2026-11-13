@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Breaking Wave — Study 1</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#050d16;overflow:hidden;
+    font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#bfe6e6}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;width:min(100vw,calc(100vh*16/9));height:auto;aspect-ratio:16/9;image-rendering:pixelated}
+  #csm{image-rendering:auto;display:none}
+  #panel{position:fixed;left:50%;bottom:10px;transform:translateX(-50%);width:min(980px,calc(100vw - 20px));
+    background:rgba(4,16,26,.8);border:1px solid rgba(120,200,210,.25);border-radius:8px;padding:8px 12px;
+    backdrop-filter:blur(4px);display:grid;gap:7px 18px;grid-template-columns:auto 1fr;align-items:center}
+  #panel.hidden{display:none}
+  .row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+  label{display:flex;align-items:center;gap:6px;white-space:nowrap;color:#8fc7cc}
+  input[type=range]{accent-color:#3ac8bf;width:105px;height:14px}
+  #scrub{width:100%;min-width:200px}
+  select,button{font:inherit;color:#d8f6f2;background:#0d2e3c;border:1px solid rgba(120,200,210,.35);border-radius:5px;padding:3px 9px;cursor:pointer}
+  button:hover{background:#14465a}
+  button.on{background:#1c8f9a;border-color:#7ae0d8;color:#fff}
+  #phase{min-width:8em;color:#e6fbe0}
+  #hint{position:fixed;top:8px;right:12px;color:rgba(200,240,240,.6);font-size:11px;pointer-events:none;text-shadow:0 1px 2px #000}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="cpix"></canvas>
+  <canvas id="csm"></canvas>
+</div>
+<div id="hint">space: pause · ←/→: scrub · P: pixel/smooth · H: hide controls</div>
+<div id="panel">
+  <div class="row">
+    <button id="bplay" class="on">❚❚ Pause</button>
+    <button id="bretry">↺ New wave</button>
+  </div>
+  <div class="row" style="flex-wrap:nowrap">
+    <input id="scrub" type="range" min="0" max="1" step="0.001" value="0">
+    <span id="phase">swell</span>
+  </div>
+  <div class="row">
+    <button id="mpix" class="on">Pixel</button>
+    <button id="msm">Smooth</button>
+    <select id="res"><option value="180">Chunky 320×180</option><option value="270" selected>Normal 480×270</option><option value="360">Fine 640×360</option></select>
+  </div>
+  <div class="row">
+    <select id="camp"><option value="beach">Camera: beach ¾</option><option value="front">Camera: beach front-on</option><option value="line">Camera: down the line</option><option value="barrel">Camera: inside the barrel</option></select>
+    <label title="0 = the whole wave crashes at once (closeout), use the timeline to scrub">Peel speed <input id="peel" type="range" min="0" max="3" step="0.05" value="1.4"></label>
+    <label>Size <input id="size" type="range" min="0.6" max="1.7" step="0.01" value="1"></label>
+    <label>Speed <input id="speed" type="range" min="0.2" max="2" step="0.05" value="1"></label>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+
+/* ───────────── utilities ───────────── */
+const clamp=(x,a=0,b=1)=>x<a?a:x>b?b:x;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const sstep=(a,b,x)=>{const t=clamp((x-a)/(b-a));return t*t*(3-2*t)};
+const fract=x=>x-Math.floor(x);
+const hash=n=>{n=Math.sin(n*127.1+311.7)*43758.5453;return n-Math.floor(n)};
+const hash2=(a,b)=>hash(a*17.31+b*91.7+3.1);
+const vnoise=x=>{const i=Math.floor(x),f=x-i,t=f*f*(3-2*f);const a=hash(i),b=hash(i+1);return a+(b-a)*t};
+const pnoise=(x,y,z)=>(Math.sin(x*12.9+y*7.2+z*4.1)+Math.sin(x*5.3-y*11.1+z*9.7)+Math.sin(-x*8.8+y*3.3+z*13.5)+Math.sin(x*3.1+y*15.7-z*6.3))/8+0.5;
+const mixC=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+const css=(c,a=1)=>a>=1?`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`:`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+function stopsAt(stops,t){
+  if(t<=stops[0][0])return stops[0][1];
+  for(let i=1;i<stops.length;i++)if(t<=stops[i][0]){const a=stops[i-1],b=stops[i];return mixC(a[1],b[1],(t-a[0])/(b[0]-a[0]))}
+  return stops[stops.length-1][1];
+}
+const cache=new Array(262144);
+function styleOf(r,g,b){
+  r=r<0?0:r>255?255:r;g=g<0?0:g>255?255:g;b=b<0?0:b>255?255:b;
+  const k=((r>>2)<<12)|((g>>2)<<6)|(b>>2);
+  return cache[k]||(cache[k]=`rgb(${(r>>2)<<2|2},${(g>>2)<<2|2},${(b>>2)<<2|2})`);
+}
+
+/* ───────────── state ───────────── */
+const P={dz:0.05,t:0,peel:1.4,size:1,speed:1,life:13,cam:'beach',mode:'pixel',res:270,playing:true,seed:0,scrubOff:0};
+
+/* ───────────── palette (ramps, 90s-ish) ───────────── */
+const PAL=[
+ '#0b1a4a','#12296b','#1a3d8f','#2552b0','#3069c4','#4a86d4','#6aa3e0','#8dbfe8','#b0d7ee','#d2e8ee',
+ '#e8f1e2','#f6f0c8','#fde9ae','#fddc96','#fbc77f','#f6ad6b','#fff7d6','#ffffff',
+ '#020b14','#031826','#06263b','#0a3550','#0e4764','#125a78','#176d8b','#1d829c','#2597ab','#30adb9','#44c3c3','#66d6c8','#8fe6cc',
+ '#0f5e5a','#157a6c','#1f9a7c','#38b98a','#62d296','#94e5a0','#c4f2a8','#e6f9b8',
+ '#f0fbfc','#dcf1f5','#c2e3ec','#a3cfdd','#82b8cc','#639fb8','#4a86a0','#2f6a86'
+].map(hex);
+const PR=new Uint8Array(PAL.length*3);PAL.forEach((c,i)=>{PR[i*3]=c[0];PR[i*3+1]=c[1];PR[i*3+2]=c[2]});
+const LUT=new Uint8Array(32768);
+(()=>{for(let r=0;r<32;r++)for(let g=0;g<32;g++)for(let b=0;b<32;b++){
+  const R=r*8+4,G=g*8+4,B=b*8+4;let best=0,bd=1e9;
+  for(let i=0;i<PAL.length;i++){const c=PAL[i];const d=3*(R-c[0])**2+4*(G-c[1])**2+2*(B-c[2])**2;if(d<bd){bd=d;best=i}}
+  LUT[(r<<10)|(g<<5)|b]=best}})();
+function bayer(n){if(n===1)return [[0]];const m=bayer(n/2),h=n/2,r=[];
+  for(let y=0;y<n;y++){r.push([]);for(let x=0;x<n;x++){r[y].push(m[y%h][x%h]*4+[[0,2],[3,1]][(y/h)|0][(x/h)|0])}}return r}
+const BAY=new Float32Array(64);{const b=bayer(8);for(let y=0;y<8;y++)for(let x=0;x<8;x++)BAY[y*8+x]=(b[y][x]+0.5)/64}
+const DITHER=26;
+
+/* ───────────── canvases ───────────── */
+const cvPix=$('cpix'),cvSm=$('csm');
+let W,H,cv,ctx,SMOOTH=false;
+function setupCanvas(){
+  SMOOTH=P.mode==='smooth';
+  H=SMOOTH?720:P.res;W=Math.round(H*16/9);
+  cv=SMOOTH?cvSm:cvPix;
+  cvPix.style.display=SMOOTH?'none':'block';cvSm.style.display=SMOOTH?'block':'none';
+  cv.width=W;cv.height=H;
+  ctx=cv.getContext('2d',SMOOTH?{}:{willReadFrequently:true});
+}
+function quantize(){
+  const img=ctx.getImageData(0,0,W,H),d=img.data;
+  for(let y=0;y<H;y++){const by=(y&7)<<3;
+    for(let x=0;x<W;x++){const i=(y*W+x)*4;const t=(BAY[by+(x&7)]-0.5)*DITHER;
+      let r=d[i]+t,g=d[i+1]+t,b=d[i+2]+t;
+      r=r<0?0:r>255?255:r;g=g<0?0:g>255?255:g;b=b<0?0:b>255?255:b;
+      const k=LUT[((r>>3)<<10)|((g>>3)<<5)|(b>>3)]*3;
+      d[i]=PR[k];d[i+1]=PR[k+1];d[i+2]=PR[k+2];d[i+3]=255}}
+  ctx.putImageData(img,0,0);
+}
+
+/* ───────────── camera ───────────── */
+const CAMS={
+  beach:{p:[5.0,1.45,3.3],t:[0.0,0.52,-1.0],fov:44},
+  front:{p:[5.2,1.0,-0.4],t:[0.0,0.55,0.35],fov:44},
+  line:{p:[2.4,0.75,-0.4],t:[0.1,0.5,2.6],fov:52},
+  barrel:{p:[-0.05,0.36,0.3],t:[-0.05,0.44,3.6],fov:62},
+};
+const cam={px:0,py:0,pz:0,fx:0,fy:0,fz:0,rx:0,ry:0,rz:0,ux:0,uy:0,uz:0,f:300,hy:0};
+function setCamera(zc){
+  const c=CAMS[P.cam];
+  cam.px=c.p[0];cam.py=c.p[1];cam.pz=zc+c.p[2];
+  let fx=c.t[0]-c.p[0],fy=c.t[1]-c.p[1],fz=c.t[2]-c.p[2];
+  let l=Math.hypot(fx,fy,fz);fx/=l;fy/=l;fz/=l;
+  // right = up × fwd  ; up=(0,1,0)
+  let rx=fz,ry=0,rz=-fx;l=Math.hypot(rx,rz);rx/=l;rz/=l;
+  // upv = fwd × right
+  const ux=fy*rz-fz*ry,uy=fz*rx-fx*rz,uz=fx*ry-fy*rx;
+  Object.assign(cam,{fx,fy,fz,rx,ry,rz,ux,uy,uz});
+  cam.f=0.5*H/Math.tan(c.fov*Math.PI/360);
+  const tanp=-fy/Math.sqrt(Math.max(1e-6,1-fy*fy));
+  cam.hy=H/2-cam.f*tanp;
+}
+function proj(x,y,z,o){
+  const dx=x-cam.px,dy=y-cam.py,dz=z-cam.pz;
+  const d=dx*cam.fx+dy*cam.fy+dz*cam.fz;
+  o.d=d;
+  if(d<0.05){o.x=1e6;o.y=1e6;return false}
+  const k=cam.f/d;
+  o.x=W/2+(dx*cam.rx+dy*cam.ry+dz*cam.rz)*k;
+  o.y=H/2-(dx*cam.ux+dy*cam.uy+dz*cam.uz)*k;
+  return true;
+}
+
+/* ───────────── sky / sea ───────────── */
+const SKY=[[0,[18,40,108]],[0.30,[52,112,192]],[0.62,[132,190,228]],[0.84,[224,238,226]],[1,[252,230,176]]];
+const OCEAN=[[0,[150,200,212]],[0.07,[62,140,166]],[0.26,[20,98,128]],[0.6,[11,68,98]],[1,[7,50,76]]];
+const HAZE=[196,226,230];
+const SUN=(()=>{const v=[-0.78,0.15,0.45];const l=Math.hypot(...v);return v.map(a=>a/l)})();
+const skyAt=el=>stopsAt(SKY,1-Math.pow(clamp(el),0.5));
+const CLOUDS=[];
+(()=>{for(let i=0;i<9;i++){const cx=hash(i*3.3)*1.4-0.2,cy=hash(i*7.1),wc=0.25+hash(i*1.9)*0.45,bl=[];
+  const n=7+((hash(i*5.5)*5)|0);
+  for(let j=0;j<n;j++){const q=j/(n-1)-0.5,hump=1-Math.abs(q)*1.7;
+    bl.push([q*wc,-Math.max(0,hump)*0.012+(hash(i*4+j*2.1)-0.5)*0.01,(0.016+hash(i+j*1.7)*0.016)*(0.45+0.9*Math.max(0,hump))*(0.6+wc)])}
+  CLOUDS.push({cx,cy,bl,sp:0.0016+hash(i)*0.002})}})();
+
+function drawSky(ts){
+  const HY=cam.hy;
+  const g=ctx.createLinearGradient(0,0,0,HY);
+  for(const [p,c] of SKY)g.addColorStop(p,css(c));
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,Math.min(H,HY+2));
+  const s={};
+  if(proj(cam.px+SUN[0]*500,cam.py+SUN[1]*500,cam.pz+SUN[2]*500,s)){
+    ctx.globalCompositeOperation='lighter';
+    const rg=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,H*0.6);
+    rg.addColorStop(0,'rgba(255,214,140,0.60)');rg.addColorStop(0.2,'rgba(255,190,120,0.24)');rg.addColorStop(1,'rgba(255,170,110,0)');
+    ctx.fillStyle=rg;ctx.fillRect(0,0,W,HY+2);
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle='rgb(255,248,220)';ctx.beginPath();ctx.arc(s.x,s.y,H*0.026,0,6.3);ctx.fill();
+  }
+  const band=H*0.10;
+  for(const c of CLOUDS){
+    const x0=((c.cx+ts*c.sp)%1.5)*W-0.15*W,Y=HY-(0.08+c.cy*0.62)*HY*0.95;
+    if(Y<-10)continue;
+    for(const [col,dx,dy] of [[[232,190,182],0.004,0.010],[[255,248,230],0,0]]){
+      ctx.fillStyle=css(col);
+      for(const [bx,by,br] of c.bl){ctx.beginPath();ctx.ellipse(x0+(bx+dx)*H,Y+(by+dy)*H,br*H*1.5,br*H*0.9,0,0,6.3);ctx.fill()}
+    }
+  }
+  const hz=ctx.createLinearGradient(0,HY-band,0,HY+2);
+  hz.addColorStop(0,'rgba(253,232,176,0)');hz.addColorStop(1,'rgba(244,238,216,0.75)');
+  ctx.fillStyle=hz;ctx.fillRect(0,HY-band,W,band+2);
+}
+const oceanRGB=row=>stopsAt(OCEAN,clamp((row-cam.hy)/(H-cam.hy)));
+function drawSea(ts,zc){
+  const HY=cam.hy;
+  const g=ctx.createLinearGradient(0,HY,0,H);
+  for(const [p,c] of OCEAN)g.addColorStop(p,css(c));
+  ctx.fillStyle=g;ctx.fillRect(0,HY,W,H-HY);
+  const px=Math.max(1,Math.round(H/270));
+  const o={},o2={};
+  // world-space ripple dashes, wrapped around the camera
+  const SPAN=30;
+  for(let m=0;m<1900;m++){
+    const hx=hash(m*1.37),hz=hash(m*2.11+5),hl=hash(m*0.77+9);
+    const x=-16+hx*30+((ts*0.18)%30)*0+Math.sin(ts*0.3+m)*0.05;
+    let z=zc+(((hz*SPAN-(zc%SPAN))%SPAN+SPAN)%SPAN)-SPAN/2;
+    const len=0.25+hl*0.9;
+    const xx=-16+((hx*30+ts*0.22)%30);
+    if(!proj(xx,0,z,o)||!proj(xx,0,z+len,o2))continue;
+    if(o.y<HY+1||o.y>H+4)continue;
+    const dist=Math.min(1,o.d/22);
+    const lit=hl>0.4;
+    ctx.fillStyle=lit?`rgba(190,232,236,${0.24*(1-dist*0.7)})`:`rgba(8,56,84,${0.22*(1-dist*0.5)})`;
+    ctx.fillRect(Math.min(o.x,o2.x),o.y,Math.max(px,Math.abs(o2.x-o.x)),px);
+  }
+  // chop: small wind ripples — a lit facet over a shadowed one, drifting and shimmering
+  for(let m=0;m<3400;m++){
+    const hx=hash(m*1.93+3),hz=hash(m*2.71+8),hl=hash(m*0.61+4),hq=hash(m*4.3+1);
+    const xx=-15+((hx*30+ts*(0.20+0.35*hl))%30);
+    const z=zc+(((hz*SPAN-(zc%SPAN))%SPAN+SPAN)%SPAN)-SPAN/2;
+    const len=0.10+0.55*Math.pow(hl,1.6);
+    if(!proj(xx,0,z,o)||!proj(xx,0,z+len,o2))continue;
+    if(o.y<HY+2||o.y>H+4)continue;
+    const near=1-Math.min(1,o.d/24);
+    const fl=0.35+0.65*Math.max(0,Math.sin(ts*(1.3+hq*1.5)+m*3.3));
+    const w=Math.max(px,Math.abs(o2.x-o.x)),x0=Math.min(o.x,o2.x);
+    const th=near>0.55?2*px:px;
+    ctx.fillStyle=`rgba(4,32,56,${0.42*(0.45+0.55*near)})`;
+    ctx.fillRect(x0,o.y+th,w,th);
+    ctx.fillStyle=`rgba(160,214,226,${0.42*fl*(0.35+0.65*near)})`;
+    ctx.fillRect(x0+px,o.y,Math.max(px,w-px),th);
+  }
+  // sun glitter streak
+  const s={};
+  if(proj(cam.px+SUN[0]*500,0,cam.pz+SUN[2]*500,s)){
+    for(let m=0;m<260;m++){
+      const v=Math.pow(hash(m*3.7),1.7),y=HY+2+v*(H-HY)*0.8;
+      const sp=(0.01+0.16*v)*W,x=s.x+(hash(m*5.1+2)-0.5)*sp*2.2;
+      const tw=0.5+0.5*Math.sin(ts*3+m*7.3);
+      ctx.fillStyle=`rgba(255,244,200,${(0.25+0.5*v)*tw*0.9})`;
+      ctx.fillRect(x,y,(0.004+0.04*v)*W*(0.4+hash(m)),px);
+    }
+  }
+}
+
+function drawSwellLines(ts,zc){
+  const o={},o2={},px=Math.max(1,Math.round(H/270));
+  for(let k=0;k<11;k++){
+    const x=-26+(((k*3.1+ts*0.30)%34)+34)%34;
+    if(x>9)continue;
+    ctx.beginPath();
+    let pen=false;
+    for(let z=zc-13;z<zc+13;z+=0.35){
+      const zz=z-((zc%0.35)+0.35)%0.35;
+      const on=vnoise(zz*0.55+k*9.7)>0.5;
+      if(!on||!proj(x+0.35*Math.sin(zz*0.8+k*2.1+ts*0.4),0.0,zz,o)){pen=false;continue}
+      if(o.y<cam.hy+1||o.y>H+2){pen=false;continue}
+      if(!pen){ctx.moveTo(o.x,o.y);pen=true}else ctx.lineTo(o.x,o.y);
+    }
+    proj(x,0,zc,o2);
+    const fade=Math.max(0.05,1-o2.d/26);
+    ctx.strokeStyle=`rgba(190,232,236,${0.15*fade+0.04})`;ctx.lineWidth=px;ctx.stroke();
+  }
+}
+function drawSeaFoam(ts,zc,mode){
+  const r=mode.closeout?0:1/(P.life*mode.vel),o={},o2={};
+  const px=Math.max(1,Math.round(H/270));
+  for(let m=0;m<420;m++){
+    const hz=hash(m*1.91+4),hx=hash(m*3.17+8),hl=hash(m*0.53+2);
+    const S=P.size,zr=mode.closeout?(hz-0.5)*9:-(0.3+hz*10);
+    let u=mode.closeout?mode.u0:0.5-r*zr;
+    if(!mode.closeout&&u>0.7)u=0.7+(u-0.7)*0.6;
+    const f=sstep(0.58,0.72,u)*(1-sstep(0.86,1.0,u));
+    if(f<0.05||hl>f*1.3)continue;
+    const xc=(mode.closeout?-0.9+1.6*u:-0.5+0.7*u);
+    const x=S*(xc+0.5+hx*(0.8+1.8*sstep(0.6,0.9,u))+0.15*Math.sin(ts*0.8+m));
+    const zw=zc+zr*S,len=(0.18+hl*0.5)*S;
+    if(!proj(x,0,zw,o)||!proj(x,0,zw+len,o2))continue;
+    if(o.y>H+3||o.y<cam.hy)continue;
+    ctx.fillStyle=`rgba(240,251,252,${0.55*f})`;
+    ctx.fillRect(Math.min(o.x,o2.x),o.y,Math.max(px,Math.abs(o2.x-o.x)),px*(1+(o.d<6?1:0)));
+  }
+}
+
+/* ───────────── life of a wave section ───────────── */
+function lifeState(u,nz,closeout){
+  const e=(a,b)=>sstep(a,b,u);
+  let A;
+  if(u<0.30)A=closeout?0.9*e(0,0.30):lerp(0.62,0.9,e(-0.15,0.30));
+  else if(u<0.60)A=0.9+0.1*e(0.30,0.52);
+  else A=(1-0.30*e(0.64,0.80))*(1-e(0.82,1.0));
+  A*=nz.amp;
+  const g0=e(0.30,0.58);
+  const g=g0*(1-0.92*e(0.70,0.80));
+  const h=Math.min(1,e(0.28,0.46)*(1-e(0.60,0.72))*(nz.hk||1));
+  const run=(u<0.6?lerp(1.5,0.30,e(0,0.34)):lerp(0.30,1.5,e(0.60,0.88)))*(nz.rk||1);
+  const ed=nz.edge||0;
+  const fr=sstep(0.55+ed,0.74+ed,u)*(1-e(0.88,1.0));
+  const rp=e(0.28,0.46)*(1-0.55*e(0.62,0.95));   // raised water ahead of the break; lives on under the whitewater
+  return {u,A,g,h,run,fr,rp,
+    xc:(closeout?-0.9+1.6*u:-0.5+0.7*u),
+    Lb:1.7+1.1*A,
+    T0:A*(0.04+0.23*Math.pow(g0,0.8))*(1-0.8*e(0.62,0.74))*(nz.tk||1),
+    R0:A*lerp(3.0,0.64,Math.pow(g0,0.8))*nz.lipk,lk:nz.lipk,
+    g0};
+}
+function bez(p0,p1,p2,p3,n,out){
+  for(let i=1;i<=n;i++){const t=i/n,m=1-t,a=m*m*m,b=3*m*m*t,c=3*m*t*t,d=t*t*t;
+    out.push([a*p0[0]+b*p1[0]+c*p2[0]+d*p3[0],a*p0[1]+b*p1[1]+c*p2[1]+d*p3[1]])}
+}
+
+/* ───────────── mesh: one skin polyline per column ───────────── */
+const NB=14,NLo=20,NLi=20,NF=18,NE=6;
+const NV=(NB+1)+NLo+NLi+(NF+1)+NE;
+const MAXCOL=360;
+const VX=new Float32Array(MAXCOL*NV),VY=new Float32Array(MAXCOL*NV),VZ=new Float32Array(MAXCOL),
+      TH=new Float32Array(MAXCOL*NV),FO=new Float32Array(MAXCOL*NV),AO=new Float32Array(MAXCOL*NV),
+      SF=new Float32Array(MAXCOL*NV),SX=new Float32Array(MAXCOL*NV),SY=new Float32Array(MAXCOL*NV),SD=new Float32Array(MAXCOL*NV);
+const COLST=[];   // per column state for sprites
+const tmpU=[];
+
+/* One continuous sheet curve: the radius of curvature R(theta)=Rmin*(1+((theta-thm)/w)^2) changes gradually.
+   It starts wide (the ramp rolling up, R0 = phi^2 * Rmin), tightens into the barrel and loosens again along the thrown lip.
+   theta is the heading measured from -x (0 = flat toward the wave, pi/2 = up the face, pi = over the top toward the beach). */
+const PHI=1.618034;
+function spiralFace(alpha,dy){
+  const thm=2.2,w=(thm-alpha)/Math.sqrt(PHI*PHI-1);
+  const R=t=>1+((t-thm)/w)*((t-thm)/w);
+  const N=96,pts=[[0,0]],dth=(Math.PI-alpha)/N;let x=0,y=0;
+  for(let i=0;i<N;i++){const t=alpha+(i+0.5)*dth,r=R(t)*dth;x+=-Math.cos(t)*r;y+=Math.sin(t)*r;pts.push([x,y])}
+  const Rm=dy/y;
+  for(const p of pts){p[0]*=Rm;p[1]*=Rm}
+  return {Rm,thm,w,R,pts};
+}
+function buildColumn(i,st,zwWorld,prof,nz_dk,su,S){
+  const zw=zwWorld/S;                      // model-space z: noise features scale with the wave
+  const o=i*NV;let k=0;
+  const {A,xc,Lb,run,h,g,T0}=st;
+  const f=s=>Math.pow(s*s*(3-2*s),1.12);
+  const rough=(zz,q)=>0.034*(vnoise(zz*6+q*0.9+P.seed)-0.5)+0.014*(vnoise(zz*17+q*3.1)-0.5);
+  const P0=[xc+0.02,A-0.9*T0];
+  // The water ahead of the wave is a sheet: flat sea -> one STRAIGHT, low ramp -> it only rolls up and curls over near the top.
+  // The ramp (Q->T) is built from the noise-free state su, so it is identical along the whole wave; all irregularity lives above Q.
+  const sA=su.A,runU=su.run;
+  const Qy=0.20*sA;
+  const Lr=sA*(0.25+1.35*su.rp)+0.4*runU*(1-su.h);          // ramp length: long and gentle for a barrel, kept under the whitewater
+  const alpha=Math.atan2(Qy,Lr);
+  const P0yU=Math.max(0.05,su.A-0.9*su.T0);
+  const sp0=spiralFace(alpha,Math.max(0.05,P0yU-Qy));
+  const Qx=su.xc+0.02+(1-su.h)*runU-su.h*sp0.pts[sp0.pts.length-1][0];
+  const fil=0.16*sA+0.02;                                   // soft fillet where the sea starts to lift
+  const dq=(Qy+Math.sqrt(Qy*Qy+2*Math.tan(alpha)*fil*Qy))/(2*Math.tan(alpha));
+  const Tx=Qx+dq;                                           // where the sea first lifts
+  const Q=[Qx,Qy];
+  const ext=sA*su.rp*1.7;
+  const P3=[su.xc+0.02+ext+lerp(run+(xc-su.xc),0.14,su.h),0];   // whitewater toe (used by the foam sprites)
+  const Rh=Math.max(P0[1],0.05)/2;
+  const P1=[P0[0]+lerp(0.35*run,-1.2*Rh,h),P0[1]-0.04*h*Rh];
+  const L2=lerp(0.45*Math.hypot(Math.max(0,Qx-P0[0]),Math.max(0.05,P0[1]-Qy)),0.9*Rh,h);
+  const P2=[Qx-Math.cos(alpha)*L2,Qy+Math.sin(alpha)*L2];
+  // back slope (outer, A)
+  const bx=[],by=[];
+  for(let q=0;q<=NB;q++){const s=1-Math.pow(1-q/NB,1.7);const x=xc-Lb+s*Lb;bx.push(x);by.push(A*f(s))}
+  const widthAt=y=>{ // horizontal distance from back slope to crest column at height y
+    for(let q=1;q<=NB;q++)if(by[q]>=y){const t=(y-by[q-1])/((by[q]-by[q-1])||1);return P0[0]-lerp(bx[q-1],bx[q],t)}
+    return 0.05};
+  for(let q=0;q<=NB;q++){VX[o+k]=bx[q];VY[o+k]=by[q]+rough(zw,q);TH[o+k]=0.9;AO[o+k]=0;FO[o+k]=0;k++}
+  let face=[P0];bez(P0,P1,P2,Q,NF,face);
+  if(h>0.002){ // barrel: follow the gradually-tightening spiral, resampled by arclength from the lip root down to the ramp
+    const pp=sp0.pts,n=pp.length,cum=[0];
+    for(let j=n-1;j>0;j--)cum.push(cum[cum.length-1]+Math.hypot(pp[j][0]-pp[j-1][0],pp[j][1]-pp[j-1][1]));
+    const tot=cum[cum.length-1],spf=[];let jj=0;
+    for(let q=0;q<=NF;q++){const c=tot*q/NF;while(jj<cum.length-2&&cum[jj+1]<c)jj++;
+      const t=(c-cum[jj])/((cum[jj+1]-cum[jj])||1),a=pp[n-1-jj],b=pp[n-2-jj];
+      spf.push([Qx+lerp(a[0],b[0],t),Qy+lerp(a[1],b[1],t)])}
+    const rx=spf[0][0],ry=spf[0][1];                       // spiral root (uniform); shift the upper part onto this column's noisy root
+    face=face.map((p,q)=>{const wq=sstep(1,0,q/NF);return [lerp(p[0],spf[q][0]+(P0[0]-rx)*wq,h),lerp(p[1],spf[q][1]+(P0[1]-ry)*wq,h)]});
+  }
+  const rampY=x=>{const d=Tx-x;return d<=0?0:Math.tan(alpha)*d*d/(d+0.5*fil)};
+  const surf=x=>{ // height of the rising water ahead of the face at forward position x
+    if(x>=Tx)return 0;
+    if(x>=Qx)return rampY(x);
+    for(let q=face.length-1;q>0;q--){const a=face[q-1],b=face[q];
+      if(b[0]>a[0]&&x>=a[0]&&x<=b[0])return lerp(a[1],b[1],(x-a[0])/(b[0]-a[0]))}
+    return 1e9};
+  // lip: the same spiral carried on over the top (inner surface); the outer surface is the inner one thickened by the sheet thickness
+  let tip=null,hasLip=g>0.012;
+  if(hasLip){
+    const D=g*A*0.94*(nz_dk),ds=0.03,kA=(P0[1]/P0yU),lk=st.lk||1;
+    let th=Math.PI,x=P0[0],y=P0[1],sg=0;
+    tmpU.length=0;tmpU.push(x,y,th,0);
+    while(sg<3.4){
+      const Rr=sp0.Rm*kA*sp0.R(th)*(1+(lk-1)*sstep(Math.PI,Math.PI+0.7,th));
+      th+=ds/Math.max(Rr,0.02);
+      x+=ds*-Math.cos(th);y+=ds*Math.sin(th);sg+=ds;tmpU.push(x,y,th,sg);
+      if(P0[1]-y>=D)break;
+      if(sg>0.12&&y<=surf(x)){y=Math.max(y,surf(x));tmpU[tmpU.length-3]=y;break}
+    }
+    const m=tmpU.length/4,L=sg;
+    const sample=(q,outer)=>{ // q 0..1 along the lip
+      const idx=Math.round(q*(m-1))*4;const ux=tmpU[idx],uy=tmpU[idx+1],t=tmpU[idx+2],s=tmpU[idx+3];
+      const kk=Math.max(0.012,T0*Math.pow(1-s/L,0.8)*(1+0.4*(vnoise(zw*10+q*6+P.seed)-0.5)));
+      return outer?[ux-kk*Math.sin(t),uy-kk*Math.cos(t),kk]:[ux,uy,kk]};
+    for(let q=1;q<=NLo;q++){const s=sample(q/NLo,true);const tf=q/NLo;
+      VX[o+k]=s[0];VY[o+k]=s[1]+rough(zw,q+20)*(1-tf)*1.7;TH[o+k]=s[2];AO[o+k]=0;
+      FO[o+k]=st.g0>0.4?0.85*sstep(0.78,1,tf)*sstep(0.4,0.7,st.g0):0;k++}
+    for(let q=NLi;q>=1;q--){const s=sample(q/NLi,false);const tf=q/NLi;
+      VX[o+k]=s[0];VY[o+k]=s[1];TH[o+k]=s[2];AO[o+k]=h*(0.55*(1-tf)+0.1);
+      FO[o+k]=st.g0>0.4?0.85*sstep(0.78,1,tf)*sstep(0.4,0.7,st.g0):0;k++}
+    const lt=tmpU.length-4;tip=[tmpU[lt],tmpU[lt+1]];
+  }else{
+    for(let q=0;q<NLo+NLi;q++){VX[o+k]=bx[NB];VY[o+k]=by[NB];TH[o+k]=0.3;AO[o+k]=0;FO[o+k]=0;k++}
+  }
+  // face (D)
+  for(let q=0;q<=NF;q++){const p=face[q];const fw=Math.sin(Math.PI*q/NF);
+    VX[o+k]=p[0]+fw*h*(0.05*(vnoise(zw*4.2+q*0.33+P.seed*7+P.t*0.10)-0.5)+0.02*(vnoise(zw*13+q*0.9)-0.5))+fw*(1-h)*0.03*(vnoise(zw*3.1+q*0.4+P.seed)-0.5);VY[o+k]=p[1]+fw*0.018*(vnoise(zw*9+q*0.5)-0.5);
+    TH[o+k]=Math.max(0.03,widthAt(p[1])*0.9);AO[o+k]=h*0.5*(1-q/NF*0.3);FO[o+k]=0;k++}
+  // straight ramp down to the sea (E)
+  for(let q=1;q<=NE;q++){const t=Math.sin(q/NE*Math.PI/2);const x=lerp(Qx,Tx,t);VX[o+k]=x;VY[o+k]=q===NE?0:rampY(x);TH[o+k]=0.5;AO[o+k]=h*0.4*(1-t);FO[o+k]=0;k++}
+  // flow coordinate: arclength along the sheet; outer surface runs toward the lip tip, inner surface runs up the face toward it
+  {const oe=(NB+1)+NLo-1;let c=0;SF[o]=0;
+   for(let q=1;q<=oe;q++){c+=Math.hypot(VX[o+q]-VX[o+q-1],VY[o+q]-VY[o+q-1]);SF[o+q]=c}
+   c=0;SF[o+oe+1]=0;
+   for(let q=oe+2;q<NV;q++){c+=Math.hypot(VX[o+q]-VX[o+q-1],VY[o+q]-VY[o+q-1]);SF[o+q]=-c}}
+  // foam from crash
+  const fr=st.fr;
+  if(fr>0.01){
+    const xf=Math.max(xc+0.02+run,(tip?tip[0]:xc)+0.35)+0.5*ext*sstep(0.6,0.8,st.u);   // whitewater front: the rising water beyond it stays clean
+    for(let q=0;q<NV;q++){const x=VX[o+q],y=VY[o+q];
+      const band=sstep(xc-1.3-0.9*st.u,xc-0.1,x);          // front of the pile is foamy, back slope fades out
+      const n=pnoise(x*1.7,y*1.7,zw*0.9);
+      FO[o+q]=Math.max(FO[o+q],clamp(fr*(0.45+1.2*band)+(n-0.5)*0.3,0,1)*(1-sstep(xf-0.25,xf+0.6,x)))}
+  }
+  prof.tip=tip;prof.P3=P3;prof.P0=P0;prof.C=[bx[NB],by[NB]];prof.hasLip=hasLip;
+  VZ[i]=zwWorld;
+  // lumpy foam surface
+  if(fr>0.02){for(let q=0;q<NV;q++){const x=VX[o+q],y=VY[o+q];
+      const m=sstep(xc-1.0,xc+0.2,x);
+      if(y>0.01)VY[o+q]+=fr*0.045*(pnoise(x*5+P.t*0.6,y*4,zw*4)-0.5)*2*m
+        // rolling ridges: foam cylinders that advance toward the beach, wavy along the crest
+        +fr*m*(0.03+0.06*sstep(0.68,0.8,st.u))*Math.min(1,y*6)*Math.sin(x*6.5-P.t*2.1+2.4*vnoise(zw*0.7+P.seed*5)+1.3*vnoise(zw*2.3))}}
+}
+
+/* ───────────── prims (quads + sprites) sorted far→near ───────────── */
+const MAXP=60000,NBUCK=1200;
+const PQ=new Float32Array(MAXP*8),PC=new Uint8Array(MAXP*3),PT=new Uint8Array(MAXP),PR2=new Float32Array(MAXP),PA=new Float32Array(MAXP);
+const NEXT=new Int32Array(MAXP),HEAD=new Int32Array(NBUCK);
+let NP=0,DMIN=1,DMAX=34;
+function addPrim(depth,type){
+  if(NP>=MAXP)return -1;
+  let b=((depth-DMIN)/(DMAX-DMIN)*NBUCK)|0;b=b<0?0:b>=NBUCK?NBUCK-1:b;
+  NEXT[NP]=HEAD[b];HEAD[b]=NP;PT[NP]=type;return NP++;
+}
+const FOAM_W=[250,253,255],FOAM_S=[150,196,216];
+let FLOWT=0;
+const DEEP=[8,62,96],MIDC=[26,142,150],GLOW0=[52,196,156],GLOW1=[206,246,150];
+function shadeColor(nx,ny,nz,vx,vy,vz,th,fo,ao,y,zq,sf,out){
+  const ndv=Math.max(0,nx*vx+ny*vy+nz*vz);
+  const fres=0.05+0.95*Math.pow(1-ndv,4);
+  const ndl=nx*SUN[0]+ny*SUN[1]+nz*SUN[2];
+  const hgt=clamp(y/1.0);
+  let r=lerp(DEEP[0],MIDC[0],hgt),g=lerp(DEEP[1],MIDC[1],hgt),b=lerp(DEEP[2],MIDC[2],hgt);
+  const dif=0.66+0.26*Math.max(0,ndl)+0.14*Math.max(0,ny);
+  r*=dif;g*=dif;b*=dif;
+  // vertical striations on the face
+  const str=0.92+0.14*vnoise(zq*9)+0.05*vnoise(y*20+zq*2)+0.03*Math.sin(y*46+zq*0.7);
+  r*=str;g*=str;b*=str;
+  // water running up the ramp, up the face and over the lip: soft bands travelling along the sheet
+  const flw=0.5+0.5*Math.sin(sf*7.5-FLOWT*2.8+2.6*vnoise(zq*0.8+sf*0.6)+1.6*vnoise(zq*2.7));
+  const fm2=0.90+0.20*flw;r*=fm2;g*=fm2;b*=fm2;
+  // translucency (sun behind the wave shining through thin water)
+  const tr=Math.exp(-th*3.4);
+  const back=Math.max(0,-ndl);
+  const gl=clamp(tr*(0.30+0.85*back+0.95*Math.max(0,-ny))*(0.86+0.28*flw));
+  const k=clamp(tr*1.25);
+  const gr=lerp(GLOW0[0],GLOW1[0],k),gg=lerp(GLOW0[1],GLOW1[1],k),gb=lerp(GLOW0[2],GLOW1[2],k);
+  const m=gl*0.92;
+  r=r*(1-m)+gr*m*1.05;g=g*(1-m)+gg*m*1.05;b=b*(1-m)+gb*m*1.05;
+  const dk=1-ao;r*=dk;g*=dk;b*=dk;
+  // sky reflection (Fresnel) + sun glint
+  const rd=2*(nx*vx+ny*vy+nz*vz);
+  const rx=rd*nx-vx,ry=rd*ny-vy,rz=rd*nz-vz;
+  const sky=skyAt(ry);
+  const fm=fres*0.42;
+  r=r*(1-fm)+sky[0]*fm;g=g*(1-fm)+sky[1]*fm;b=b*(1-fm)+sky[2]*fm;
+  const rl=Math.max(0,rx*SUN[0]+ry*SUN[1]+rz*SUN[2]);
+  const sp=Math.pow(rl,140)*0.55;
+  r+=255*sp;g+=250*sp;b+=235*sp;
+  // foam
+  if(fo>0.02){
+    const sh=0.62+0.38*clamp(ny*0.5+0.5+ndl*0.2);
+    const fr=FOAM_S[0]+(FOAM_W[0]-FOAM_S[0])*sh,fg=FOAM_S[1]+(FOAM_W[1]-FOAM_S[1])*sh,fb=FOAM_S[2]+(FOAM_W[2]-FOAM_S[2])*sh;
+    r=r*(1-fo)+fr*fo;g=g*(1-fo)+fg*fo;b=b*(1-fo)+fb*fo;
+  }
+  out[0]=r;out[1]=g;out[2]=b;
+}
+
+const _c=[0,0,0],_p={x:0,y:0,d:0};
+function sprite(x,y,z,rad,col,alpha,type=1){
+  if(!proj(x,y,z,_p))return;
+  const rp=rad*cam.f/_p.d;
+  if(_p.d<1.1||rp<0.3||_p.x<-20||_p.x>W+20||_p.y<-20||_p.y>H+20)return;
+  const id=addPrim(_p.d-rad*0.3,type);if(id<0)return;
+  PQ[id*8]=_p.x;PQ[id*8+1]=_p.y;PR2[id]=Math.max(rp,0.6);PA[id]=alpha;
+  PC[id*3]=col[0];PC[id*3+1]=col[1];PC[id*3+2]=col[2];
+}
+
+function drawMesh(ts,zc,mode){
+  const closeout=mode.closeout;FLOWT=ts;
+  const zSpan=18,dz=P.dz;
+  const zStart=Math.floor((zc-11.0)/dz)*dz;
+  const NZ=Math.min(MAXCOL,Math.ceil(zSpan/dz));
+  HEAD.fill(-1);NP=0;
+  const prof={};
+  const S=P.size;
+  const r=closeout?0:1/(P.life*mode.vel);
+  const NZ0={amp:1,lipk:1,rk:1,tk:1,hk:1,dk:1,edge:0};
+  for(let i=0;i<NZ;i++){
+    const zw=zStart+i*dz,zr=zw-zc;
+    const zrm=zr/S,zq=zw/S;                 // model-space z (the wave is built at unit size, then scaled by S)
+    let ub=closeout?mode.u0:0.5-r*zrm;
+    let u=ub+0.085*(2*vnoise(zq*0.28+P.seed*3.1)-1)+0.03*(2*vnoise(zq*1.1+P.seed)-1);
+    if(!closeout){ if(u>0.7)u=0.7+(u-0.7)*0.6; if(ub>0.7)ub=0.7+(ub-0.7)*0.6; }   // stretch the whitewater phase so the tail runs on much further
+    const n=closeout?Math.floor(P.t/P.life):0;
+    const wv=hash(n*3.7+P.seed*13.1);
+    const nz={amp:(0.92+0.16*wv)*(1+0.18*(2*vnoise(zq*0.33+P.seed)-1))*(1+0.05*(2*vnoise(zq*1.5+P.seed*2+5)-1)),
+              lipk:1+0.3*(2*vnoise(zq*0.5+7+P.seed)-1),
+              rk:1+0.28*(2*vnoise(zq*0.65+21+P.seed)-1),
+              tk:1+0.30*(2*vnoise(zq*0.9+33+P.seed)-1),
+              hk:1.0+0.22*vnoise(zq*0.6+44+P.seed),
+              dk:1+0.07*(2*vnoise(zq*1.3+9+P.seed)-1),
+              edge:0.045*(2*vnoise(zq*2.1+11+P.seed)-1)+0.025*(2*vnoise(zq*6.3+3)-1)};
+    let env=sstep(0,2.2,(zStart+zSpan)-zw-0.5)*sstep(0,1.5,zw-zStart-0.2);
+    if(closeout){env*=sstep(-4.6,-2.2,zrm)*sstep(4.6,2.2,zrm);u-=0.05*Math.abs(zrm)/3;ub-=0.05*Math.abs(zrm)/3}
+    const st=lifeState(u,nz,closeout);
+    NZ0.amp=0.92+0.16*wv;
+    const su=lifeState(ub,NZ0,closeout);    // noise-free state: drives the straight, uniform rising water
+    st.A*=env;st.T0*=env;su.A*=env;
+    if(st.A<0.012){for(let q=0;q<NV;q++){VX[i*NV+q]=0;VY[i*NV+q]=-1}COLST[i]=null;VZ[i]=zw;continue}
+    buildColumn(i,st,zw,prof,nz.dk,su,S);
+    if(S!==1){const o=i*NV;for(let q=0;q<NV;q++){VX[o+q]*=S;VY[o+q]*=S}}
+    COLST[i]={st,tip:prof.tip,P3:prof.P3,P0:prof.P0,C:prof.C,zw,u};
+  }
+  // project
+  for(let i=0;i<NZ;i++){
+    const o=i*NV,z=VZ[i];
+    for(let q=0;q<NV;q++){
+      proj(VX[o+q],VY[o+q],z,_p);SX[o+q]=_p.x;SY[o+q]=_p.y;SD[o+q]=_p.d}
+  }
+  // quads
+  const cx=cam.px,cy=cam.py,cz=cam.pz;
+  for(let i=0;i<NZ-1;i++){
+    if(!COLST[i]&&!COLST[i+1])continue;
+    const oa=i*NV,ob=(i+1)*NV,z0=VZ[i],z1=VZ[i+1];
+    for(let j=0;j<NV-1;j++){
+      const a=oa+j,b=a+1,c=ob+j+1,d=ob+j;
+      if(VY[a]<-0.5||VY[d]<-0.5)continue;
+      const esx=VX[b]-VX[a],esy=VY[b]-VY[a];
+      if(esx*esx+esy*esy<2e-7)continue;
+      // outward normal = ez × es
+      const ezx=VX[d]-VX[a],ezy=VY[d]-VY[a],ezz=z1-z0;
+      let nx=ezy*0-ezz*esy,ny=ezz*esx-ezx*0,nz=ezx*esy-ezy*esx;
+      const nl=Math.hypot(nx,ny,nz);if(nl<1e-9)continue;nx/=nl;ny/=nl;nz/=nl;
+      const mx=(VX[a]+VX[c])*0.5,my=(VY[a]+VY[c])*0.5,mz=(z0+z1)*0.5;
+      let vx=cx-mx,vy=cy-my,vz=cz-mz;const vl=Math.hypot(vx,vy,vz);vx/=vl;vy/=vl;vz/=vl;
+      if(nx*vx+ny*vy+nz*vz<=0.02)continue;
+      const x0=SX[a],y0=SY[a],x1=SX[b],y1=SY[b],x2=SX[c],y2=SY[c],x3=SX[d],y3=SY[d];
+      if(SD[a]<0.1||SD[b]<0.1||SD[c]<0.1||SD[d]<0.1)continue;
+      if((x0<-8&&x1<-8&&x2<-8&&x3<-8)||(x0>W+8&&x1>W+8&&x2>W+8&&x3>W+8)||(y0<-8&&y1<-8&&y2<-8&&y3<-8)||(y0>H+8&&y1>H+8&&y2>H+8&&y3>H+8))continue;
+      const th=(TH[a]+TH[b]+TH[c]+TH[d])*0.25,fo0=(FO[a]+FO[b]+FO[c]+FO[d])*0.25,ao=(AO[a]+AO[b]+AO[c]+AO[d])*0.25;
+      let fo=fo0;
+      if(fo>0.02){const pn=pnoise(mx*2.4/S+ts*0.2,my*2.4/S,mz*2.0/S)*0.75+hash2(((mx+mz)*97)|0,(my*131)|0)*0.25;fo=clamp((fo-0.38+(pn-0.5)*0.55)*2.2+0.5,0,1);if(fo0>0.97)fo=Math.max(fo,0.92)}
+      shadeColor(nx,ny,nz,vx,vy,vz,th,fo,ao*(1-Math.min(1,fo0*1.2)),my/S,mz/S,(SF[a]+SF[b]+SF[c]+SF[d])*0.25,_c);
+      const id=addPrim((SD[a]+SD[b]+SD[c]+SD[d])*0.25,0);if(id<0)continue;
+      // expand slightly from centroid to avoid seams
+      const ccx=(x0+x1+x2+x3)*0.25,ccy=(y0+y1+y2+y3)*0.25,e=0.55;
+      const q=id*8;
+      PQ[q]=x0+Math.sign(x0-ccx)*e;PQ[q+1]=y0+Math.sign(y0-ccy)*e;
+      PQ[q+2]=x1+Math.sign(x1-ccx)*e;PQ[q+3]=y1+Math.sign(y1-ccy)*e;
+      PQ[q+4]=x2+Math.sign(x2-ccx)*e;PQ[q+5]=y2+Math.sign(y2-ccy)*e;
+      PQ[q+6]=x3+Math.sign(x3-ccx)*e;PQ[q+7]=y3+Math.sign(y3-ccy)*e;
+      PC[id*3]=_c[0];PC[id*3+1]=_c[1];PC[id*3+2]=_c[2];
+    }
+  }
+  emitSprites(NZ,ts,mode);
+  // draw far → near
+  let last='';
+  for(let bk=NBUCK-1;bk>=0;bk--){
+    for(let id=HEAD[bk];id>=0;id=NEXT[id]){
+      const sty=styleOf(PC[id*3],PC[id*3+1],PC[id*3+2]);
+      if(PT[id]===0){
+        if(sty!==last){ctx.fillStyle=sty;last=sty}
+        const q=id*8;
+        ctx.beginPath();ctx.moveTo(PQ[q],PQ[q+1]);ctx.lineTo(PQ[q+2],PQ[q+3]);ctx.lineTo(PQ[q+4],PQ[q+5]);ctx.lineTo(PQ[q+6],PQ[q+7]);ctx.fill();
+      }else if(PT[id]===1){
+        const q=id*8,rr=PR2[id];
+        if(PA[id]<1){ctx.globalAlpha=PA[id]}
+        ctx.fillStyle=sty;last=sty;
+        ctx.beginPath();ctx.arc(PQ[q],PQ[q+1],rr,0,6.2832);ctx.fill();
+        if(PA[id]<1)ctx.globalAlpha=1;
+      }else{
+        // foam billow: soft blue-grey underside, bright lit top
+        const q=id*8,rr=PR2[id];
+        ctx.fillStyle=styleOf(176,212,228);last='';
+        ctx.beginPath();ctx.arc(PQ[q]+rr*0.10,PQ[q+1]+rr*0.16,rr,0,6.2832);ctx.fill();
+        ctx.fillStyle=styleOf(250,253,255);
+        ctx.beginPath();ctx.arc(PQ[q]-rr*0.06,PQ[q+1]-rr*0.10,rr*0.86,0,6.2832);ctx.fill();
+      }
+    }
+  }
+}
+
+/* ───────────── sprites: foam billows, spray, drips ───────────── */
+function emitSprites(NZ,ts,mode){
+  if(P.noSprites)return;
+  const S=P.size,spr=(x,y,z,rad,col,al,ty)=>sprite(x*S,y*S,z,rad*S,col,al,ty);
+  const closeout=mode.closeout;
+  for(let i=0;i<NZ;i++){
+    const c=COLST[i];if(!c)continue;
+    const {st,tip,P3,C}=c,zw=c.zw,u=c.u;
+    const key=Math.round(zw/P.dz);
+    // foam billows riding the whitewater
+    if(st.fr>0.03){
+      for(let m=0;m<6;m++){
+        const hh=hash2(key,m+1);
+        if(hash2(key,m+11)>st.fr*1.05)continue;
+        const ex=sstep(0.57,0.75,u),fade=1-0.8*sstep(0.86,1,u);
+        const cxp=lerp((tip?tip[0]:P3[0]),P3[0]+0.3,0.5)+0.55*sstep(0.6,0.95,u)+(hh-0.5)*(0.4+1.5*ex);
+        const hmax=0.05+(1.05*st.A+0.12)*ex*(1-0.55*sstep(0.72,0.95,u));
+        const yy=Math.pow(hash2(key,m+31),0.55)*hmax+0.02;
+        const hr=hash2(key,m+41);
+        const rad=(0.014+0.07*hr*hr*hr)*(0.6+0.8*ex)*(1+0.7*sstep(0.68,0.8,u))*fade;
+        const wob=0.025*Math.sin(ts*2.2+hh*40);
+        spr(cxp+wob,yy+0.02*Math.cos(ts*1.9+hh*30),zw+(hash2(key,m+5)-0.5)*0.1,rad,FOAM_W,1,2);
+      }
+    }
+    // impact burst: the lip slamming into the trough throws up a big foam explosion (also hides the join)
+    const bu=sstep(0.54,0.60,u)*(1-sstep(0.70,0.88,u));
+    if(bu>0.02){
+      const tp=tip||P3,age=clamp((u-0.56)/0.22,0,1);
+      for(let m=0;m<5;m++){
+        const hh=hash2(key,m+120);
+        if(hash2(key,m+130)>bu*1.1)continue;
+        const x=tp[0]+(hh-0.30)*(0.45+1.5*age)+0.07*Math.sin(ts*2.6+hh*50);
+        const y=tp[1]+0.03+Math.pow(hash2(key,m+140),0.75)*(0.25+1.0*st.A)*(0.55+0.45*bu);
+        const rad=(0.045+0.11*Math.pow(hash2(key,m+150),2))*(0.65+0.7*bu);
+        spr(x,y+0.03*Math.cos(ts*2.1+hh*30),zw+(hash2(key,m+160)-0.5)*0.14,rad,FOAM_W,1,2);
+      }
+    }
+    // impact spray
+    if(u>0.55&&u<0.90&&tip){
+      for(let m=0;m<11;m++){
+        const hh=hash2(key,m+70);
+        const age=(u-0.565-hh*0.03)*P.life*(0.25+0.75*hash2(key,m+71));
+        if(age<=0)continue;
+        const vx=(hash2(key,m+72)*2.6-0.3),vy=1.8+4.2*hash2(key,m+73),vz=(hash2(key,m+74)-0.5)*1.1;
+        const x=tip[0]+vx*age,y=tip[1]+0.02+vy*age-0.5*3.4*age*age,z=zw+vz*age*S;
+        if(y<Math.max(0.03,tip[1]-0.02)||age>2.2)continue;
+        spr(x,y,z,0.022+0.038*Math.pow(hash2(key,m+75),1.5),FOAM_W,clamp(1.9-age,0.2,1));
+      }
+    }
+    // lip drips
+    if(st.g0>0.5&&u<0.64&&tip){
+      for(let m=0;m<2;m++){
+        const a=fract(hash2(key,m+90)+ts*(0.6+0.4*hash2(key,m+91)))*0.55;
+        spr(tip[0]+0.04*a+(hash2(key,m+92)-0.5)*0.05,tip[1]+0.01-0.5*3.0*a*a,zw,0.012,FOAM_W,0.9);
+      }
+    }
+    // crest spindrift blown back
+    if(st.g0>0.15&&u<0.7&&C){
+      const a=fract(hash2(key,3)+ts*0.9);
+      spr(C[0]-0.9*a,C[1]+0.05+0.25*a*(1-a),zw,0.010,FOAM_W,0.8*(1-a));
+    }
+  }
+}
+
+/* ───────────── render ───────────── */
+function render(){
+  const ts=P.t;
+  const vel=P.peel,closeout=vel<0.08;
+  const zc=closeout?0:vel*ts;
+  const mode={closeout,vel:Math.max(vel,0.08),u0:fract(ts/P.life+P.scrubOff)};
+  setCamera(zc);
+  drawSky(ts);drawSea(ts,zc);drawSwellLines(ts,zc);drawSeaFoam(ts,zc,mode);drawMesh(ts,zc,mode);
+  if(!SMOOTH)quantize();
+  updateUI(mode);
+}
+
+/* ───────────── UI ───────────── */
+const PHASES=[[0,'swell'],[0.30,'pitching'],[0.46,'barrel'],[0.58,'impact'],[0.70,'whitewater'],[0.88,'fading']];
+function updateUI(mode){
+  const row=$('scrub').parentElement;
+  if(mode.closeout){const u=mode.u0;let n=PHASES[0][1];for(const [a,b] of PHASES)if(u>=a)n=b;$('phase').textContent=n;$('scrub').value=u;row.style.opacity=1;$('scrub').disabled=false}
+  else{$('phase').textContent='peeling →';row.style.opacity=0.35;$('scrub').disabled=true}
+}
+$('peel').addEventListener('input',e=>{P.peel=parseFloat(e.target.value);if(!P.playing)render()});
+$('size').addEventListener('input',e=>{P.size=parseFloat(e.target.value);if(!P.playing)render()});
+$('speed').addEventListener('input',e=>{P.speed=parseFloat(e.target.value)});
+$('scrub').addEventListener('input',e=>{const u=parseFloat(e.target.value);P.scrubOff=u-fract(P.t/P.life);if(!P.playing||P.peel<0.08)render()});
+$('camp').onchange=e=>{P.cam=e.target.value;render()};
+function setPlaying(v){P.playing=v;$('bplay').textContent=v?'❚❚ Pause':'▶ Play';$('bplay').classList.toggle('on',v)}
+$('bplay').onclick=()=>setPlaying(!P.playing);
+$('bretry').onclick=()=>{P.seed++;P.t=0;P.scrubOff=0;render()};
+function setMode(m){P.mode=m;$('mpix').classList.toggle('on',m==='pixel');$('msm').classList.toggle('on',m==='smooth');setupCanvas();render()}
+$('mpix').onclick=()=>setMode('pixel');$('msm').onclick=()=>setMode('smooth');
+$('res').onchange=e=>{P.res=parseInt(e.target.value);setupCanvas();render()};
+addEventListener('keydown',e=>{
+  if(e.target.tagName==='SELECT')return;
+  if(e.code==='Space'){e.preventDefault();setPlaying(!P.playing)}
+  else if(e.code==='ArrowRight'){P.t+=e.shiftKey?1:0.2;render()}
+  else if(e.code==='ArrowLeft'){P.t-=e.shiftKey?1:0.2;render()}
+  else if(e.key==='p'||e.key==='P')setMode(P.mode==='pixel'?'smooth':'pixel');
+  else if(e.key==='h'||e.key==='H')$('panel').classList.toggle('hidden');
+});
+
+/* ───────────── loop ───────────── */
+let last=performance.now();
+let avgMs=25;
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  if(P.playing){
+    P.t+=dt*P.speed;
+    const a=performance.now();render();const ms=performance.now()-a;
+    avgMs=avgMs*0.93+ms*0.07;
+    if(avgMs>34&&P.dz<0.085){P.dz=Math.min(0.085,P.dz+0.005);avgMs=28}
+    else if(avgMs<19&&P.dz>0.05){P.dz=Math.max(0.05,P.dz-0.005);avgMs=24}
+  }
+  requestAnimationFrame(frame);
+}
+setupCanvas();render();requestAnimationFrame(frame);
+window.__wave={P,render,setupCanvas,setPlaying,CAMS};
+})();
+</script>
+</body>
+</html>
