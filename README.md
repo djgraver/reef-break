@@ -22,7 +22,11 @@ Branch `v1` holds the first tuned version (deeper barrel, longer-lived whitewate
 - Wind mist blows off the lip as soft, drifting, fading plumes; the face has fine chop and sun glints.
 - The lip lands and splashes within a second, and broken water keeps rolling in as clumpy whitewater instead of vanishing.
 
-**Next**: gameplay (the surfer riding the line) comes after the wave.
+## v3: Reef Wave 3D
+
+`v3/` is a new start in real 3D. The wave shape comes from a 2D free-surface flow solver run over a reef (Teahupo'o-style and Cloudbreak-style presets), swept along the reef to make a peeling barrel, and shown with three.js. Whitewater after the lip lands is modelled, not solved. See `v3/README.md`.
+
+**Next**: better whitewater and reef tuning, then gameplay (the surfer riding the line).
 
 ## Study 1 (restart, wave only)
 
