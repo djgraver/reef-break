@@ -26,6 +26,10 @@ Branch `v1` holds the first tuned version (deeper barrel, longer-lived whitewate
 
 `v3/` is a new start in real 3D. The wave shape comes from a 2D free-surface flow solver run over a reef (Teahupo'o-style and Cloudbreak-style presets), swept along the reef to make a peeling barrel, and shown with three.js. Whitewater after the lip lands is modelled, not solved. See `v3/README.md`.
 
+## v4: one wave, a ride, a place
+
+`v4/` is the v3 viewer with sections along the lip, a wider and wilder size range, a 10-second ride with a start and an end, a single wave with a distant swell line, and an exposed reef and beach at the take-off. Same solver data as v3. See `v4/README.md`.
+
 **Next**: better whitewater and reef tuning, then gameplay (the surfer riding the line).
 
 ## Study 1 (restart, wave only)
