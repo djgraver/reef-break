@@ -1,3 +1,7 @@
 node_modules/
 .DS_Store
 *.log
+__pycache__/
+v3/sim/*.npz
+v3/sim/*.ck
+v3/sim/*.png
